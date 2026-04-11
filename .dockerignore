@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+app.db
+.venv/
+venv/
+ENV/
+.git/
+.history/
+*.md
+.env
+.envrc
+.venv
+venv.bak/
