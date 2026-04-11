@@ -68,6 +68,11 @@ class DepartmentResponse(BaseModel):
         from_attributes = True
 
 
+class UserDepartmentCreate(BaseModel):
+    """Schema for assigning a user to a department"""
+    department_id: int
+
+
 # ============ USER SCHEMAS ============
 
 class UserRegister(BaseModel):
@@ -85,7 +90,7 @@ class UserRegister(BaseModel):
     course: Optional[str] = None                                 # Курс
     group: Optional[str] = None                                  # Группа
     position: Optional[str] = "участник"                         # Должность
-    department: Optional[str] = None                             # Отдел
+    department_ids: Optional[List[int]] = None                   # Отделы (список ID)
     
     # Contact
     telegram: Optional[str] = None                               # Телеграм
@@ -106,7 +111,7 @@ class UserUpdate(BaseModel):
     course: Optional[str] = None
     group: Optional[str] = None
     position: Optional[str] = None
-    department: Optional[str] = None
+    department_ids: Optional[List[int]] = None  # Список ID отделов
     telegram: Optional[str] = None
     is_active: Optional[bool] = None
     is_deactivated: Optional[bool] = None
@@ -115,6 +120,15 @@ class UserUpdate(BaseModel):
 class PasswordChange(BaseModel):
     """Schema for changing user password"""
     password: str = Field(..., min_length=6, description="New password (min 6 characters)")
+
+
+class DepartmentInfo(BaseModel):
+    """Schema for department info in user response"""
+    id: int
+    name: str
+    
+    class Config:
+        from_attributes = True
 
 
 class UserResponse(BaseModel):
@@ -129,7 +143,7 @@ class UserResponse(BaseModel):
     group: Optional[str] = None
     position_id: int
     position_name: Optional[str] = None
-    department: Optional[str] = None
+    departments: Optional[List[DepartmentInfo]] = None  # Список отделов
     telegram: Optional[str] = None
     is_active: bool
     is_deactivated: bool

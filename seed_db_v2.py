@@ -115,33 +115,33 @@ for pos_data in positions_data:
 db.commit()
 
 # Create only admin user
-admin_data = {
-    "login": "admin",
-    "password": "admin123",
-    "first_name": "Админ",
-    "last_name": "Системный",
-    "position": "admin",
-    "department": "Администрирование"
-}
-
-existing_admin = db.query(models.User).filter(models.User.login == admin_data["login"]).first()
+existing_admin = db.query(models.User).filter(models.User.login == "admin").first()
 if not existing_admin:
-    position = positions.get(admin_data["position"])
+    position = positions.get("admin")
     if position:
         admin = models.User(
-            login=admin_data["login"],
-            password_hash=pwd_context.hash(admin_data["password"]),
-            first_name=admin_data["first_name"],
-            last_name=admin_data["last_name"],
+            login="admin",
+            password_hash=pwd_context.hash("admin123"),
+            first_name="Админ",
+            last_name="Системный",
             position_id=position.id,
-            department=admin_data["department"],
             is_active=True,
             is_deactivated=False
         )
         db.add(admin)
-        print(f"Created admin user: {admin_data['login']}")
+        db.commit()
+        
+        # Create default department and assign to admin
+        dept = models.Department(name="Администрирование", description="Административный отдел")
+        db.add(dept)
+        db.commit()
+        
+        # Link admin to department
+        user_dept = models.UserDepartment(user_id=admin.id, department_id=dept.id)
+        db.add(user_dept)
+        print(f"Created admin user with department")
 else:
-    print(f"Admin user exists: {admin_data['login']}")
+    print(f"Admin user exists")
 
 db.commit()
 

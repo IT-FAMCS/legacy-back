@@ -320,6 +320,23 @@ async def delete_position(
 
 # ============ USER MANAGEMENT ENDPOINTS ============
 
+def get_user_departments(user: models.User, db: Session) -> List[dict]:
+    """Get list of departments for a user"""
+    user_depts = db.query(models.UserDepartment).filter(
+        models.UserDepartment.user_id == user.id
+    ).all()
+    return [{"id": ud.department.id, "name": ud.department.name} for ud in user_depts]
+
+
+def format_user_response(user: models.User, db: Session) -> dict:
+    """Format user response with departments list"""
+    return {
+        **user.__dict__,
+        "position_name": user.position_ref.name,
+        "departments": get_user_departments(user, db)
+    }
+
+
 @app.post("/api/register", response_model=schemas.UserResponse, status_code=status.HTTP_201_CREATED, summary="Register new user")
 async def register_user(
     user_data: schemas.UserRegister,
@@ -364,49 +381,50 @@ async def register_user(
         course=user_data.course,
         group=user_data.group,
         position_id=position.id,
-        department=user_data.department,
         telegram=user_data.telegram,
     )
     
     db.add(new_user)
     db.commit()
+    
+    # Assign departments if provided
+    if user_data.department_ids:
+        for dept_id in user_data.department_ids:
+            dept = db.query(models.Department).filter(models.Department.id == dept_id).first()
+            if dept:
+                user_dept = models.UserDepartment(user_id=new_user.id, department_id=dept_id)
+                db.add(user_dept)
+        db.commit()
+    
     db.refresh(new_user)
     
-    return {
-        **new_user.__dict__,
-        "position_name": position.name
-    }
+    return format_user_response(new_user, db)
 
 
 @app.get("/api/users", response_model=List[schemas.UserResponse], summary="Get users list")
 async def get_users(
-    department: Optional[str] = None,
+    department_id: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
     """Get users list - available to all authenticated users"""
     query = db.query(models.User).join(models.Position)
     
-    if department:
-        query = query.filter(models.User.department == department)
+    if department_id:
+        query = query.join(models.UserDepartment).filter(models.UserDepartment.department_id == department_id)
     
     users = query.all()
     result = []
     for user in users:
-        result.append({
-            **user.__dict__,
-            "position_name": user.position_ref.name
-        })
+        result.append(format_user_response(user, db))
     return result
 
 
 @app.get("/api/user/me", response_model=schemas.UserResponse, summary="Get current user info")
 async def get_current_user_info(
-    current_user: models.User = Depends(get_current_user)
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    return {
-        **current_user.__dict__,
-        "position_name": current_user.position_ref.name
-    }
+    return format_user_response(current_user, db)
 
 
 @app.put("/api/user/change/{target_login}", response_model=schemas.UserResponse, summary="Update user data")
@@ -439,13 +457,28 @@ async def update_user_data(
                 )
             target_user.position_id = new_position.id
         
-        update_data = user_update.dict(exclude_unset=True, exclude={"position"})
+        update_data = user_update.dict(exclude_unset=True, exclude={"position", "department_ids"})
         for field, value in update_data.items():
             if value is not None:
                 setattr(target_user, field, value)
+        
+        # Update departments if provided
+        if user_update.department_ids is not None:
+            # Remove existing department assignments
+            db.query(models.UserDepartment).filter(
+                models.UserDepartment.user_id == target_user.id
+            ).delete()
+            
+            # Add new department assignments
+            for dept_id in user_update.department_ids:
+                dept = db.query(models.Department).filter(models.Department.id == dept_id).first()
+                if dept:
+                    user_dept = models.UserDepartment(user_id=target_user.id, department_id=dept_id)
+                    db.add(user_dept)
+        
         db.commit()
         db.refresh(target_user)
-        return {**target_user.__dict__, "position_name": target_user.position_ref.name}
+        return format_user_response(target_user, db)
     
     # No permissions
     raise HTTPException(
