@@ -96,6 +96,11 @@ class UserRegister(BaseModel):
     telegram: Optional[str] = None                               # Телеграм
 
 
+class BulkUserRegister(BaseModel):
+    """Schema for bulk user registration"""
+    users: List[UserRegister] = Field(..., min_length=1)
+
+
 class UserLogin(BaseModel):
     """Schema for user login"""
     login: str

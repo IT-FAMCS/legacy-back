@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -328,6 +328,86 @@ def get_user_departments(user: models.User, db: Session) -> List[dict]:
     return [{"id": ud.department.id, "name": ud.department.name} for ud in user_depts]
 
 
+
+
+def validate_user_registration_data(
+    user_data: schemas.UserRegister,
+    current_user: models.User,
+    db: Session
+) -> Dict[str, object]:
+    existing_user = db.query(models.User).filter(models.User.login == user_data.login).first()
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Пользователь с логином '{user_data.login}' уже существует"
+        )
+
+    position = db.query(models.Position).filter(models.Position.name == user_data.position).first()
+    if not position:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Должность '{user_data.position}' не найдена"
+        )
+
+    if not has_higher_authority(current_user.position_ref, position):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Недостаточно прав для назначения должности '{user_data.position}'"
+        )
+
+    validated_department_ids = []
+    if user_data.department_ids:
+        seen_department_ids = set()
+        for dept_id in user_data.department_ids:
+            if dept_id in seen_department_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"У пользователя '{user_data.login}' отдел с id={dept_id} указан несколько раз"
+                )
+            seen_department_ids.add(dept_id)
+
+            dept = db.query(models.Department).filter(models.Department.id == dept_id).first()
+            if not dept:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Отдел с id={dept_id} не найден для пользователя '{user_data.login}'"
+                )
+            validated_department_ids.append(dept_id)
+
+    return {
+        "position": position,
+        "department_ids": validated_department_ids
+    }
+
+
+def create_user_with_relations(
+    user_data: schemas.UserRegister,
+    position: models.Position,
+    department_ids: List[int],
+    db: Session
+) -> models.User:
+    new_user = models.User(
+        login=user_data.login,
+        password_hash=hash_password(user_data.password),
+        first_name=user_data.first_name,
+        last_name=user_data.last_name,
+        middle_name=user_data.middle_name,
+        birth_date=user_data.birth_date,
+        course=user_data.course,
+        group=user_data.group,
+        position_id=position.id,
+        telegram=user_data.telegram,
+    )
+
+    db.add(new_user)
+    db.flush()
+
+    for dept_id in department_ids:
+        user_dept = models.UserDepartment(user_id=new_user.id, department_id=dept_id)
+        db.add(user_dept)
+
+    return new_user
+
 def format_user_response(user: models.User, db: Session) -> dict:
     """Format user response with departments list"""
     return {
@@ -348,57 +428,70 @@ async def register_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Недостаточно прав для регистрации пользователей"
         )
-    
-    existing_user = db.query(models.User).filter(models.User.login == user_data.login).first()
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Пользователь с таким логином уже существует"
-        )
-    
-    # Find position by name
-    position = db.query(models.Position).filter(models.Position.name == user_data.position).first()
-    if not position:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Должность '{user_data.position}' не найдена"
-        )
-    
-    # Check if current user can assign this position
-    if not has_higher_authority(current_user.position_ref, position):
+
+    validation_result = validate_user_registration_data(user_data, current_user, db)
+    new_user = create_user_with_relations(
+        user_data=user_data,
+        position=validation_result["position"],
+        department_ids=validation_result["department_ids"],
+        db=db
+    )
+
+    db.commit()
+    db.refresh(new_user)
+
+    return format_user_response(new_user, db)
+
+
+@app.post("/api/register/bulk", response_model=List[schemas.UserResponse], status_code=status.HTTP_201_CREATED, summary="Register multiple users")
+async def register_users_bulk(
+    users_data: schemas.BulkUserRegister,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not can_register_users(current_user.position_ref):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Недостаточно прав для назначения этой должности"
+            detail="Недостаточно прав для регистрации пользователей"
         )
-    
-    new_user = models.User(
-        login=user_data.login,
-        password_hash=hash_password(user_data.password),
-        first_name=user_data.first_name,
-        last_name=user_data.last_name,
-        middle_name=user_data.middle_name,
-        birth_date=user_data.birth_date,
-        course=user_data.course,
-        group=user_data.group,
-        position_id=position.id,
-        telegram=user_data.telegram,
-    )
-    
-    db.add(new_user)
-    db.commit()
-    
-    # Assign departments if provided
-    if user_data.department_ids:
-        for dept_id in user_data.department_ids:
-            dept = db.query(models.Department).filter(models.Department.id == dept_id).first()
-            if dept:
-                user_dept = models.UserDepartment(user_id=new_user.id, department_id=dept_id)
-                db.add(user_dept)
+
+    payload_logins = [user.login for user in users_data.users]
+    duplicated_logins = sorted({login for login in payload_logins if payload_logins.count(login) > 1})
+    if duplicated_logins:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"В запросе повторяются логины: {', '.join(duplicated_logins)}"
+        )
+
+    prepared_users = []
+    for user_data in users_data.users:
+        validation_result = validate_user_registration_data(user_data, current_user, db)
+        prepared_users.append({
+            "user_data": user_data,
+            "position": validation_result["position"],
+            "department_ids": validation_result["department_ids"]
+        })
+
+    created_users = []
+    try:
+        for item in prepared_users:
+            new_user = create_user_with_relations(
+                user_data=item["user_data"],
+                position=item["position"],
+                department_ids=item["department_ids"],
+                db=db
+            )
+            created_users.append(new_user)
+
         db.commit()
-    
-    db.refresh(new_user)
-    
-    return format_user_response(new_user, db)
+
+        for user in created_users:
+            db.refresh(user)
+
+        return [format_user_response(user, db) for user in created_users]
+    except Exception:
+        db.rollback()
+        raise
 
 
 @app.get("/api/users", response_model=List[schemas.UserResponse], summary="Get users list")
