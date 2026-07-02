@@ -1,20 +1,14 @@
-from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+# Secret key for JWT tokens (generate with: python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+SECRET_KEY=your-secret-key-change-in-production
 
-SQLALCHEMY_DATABASE_URL = "sqlite:///./app.db"
+# Database URL (SQLite by default)
+DATABASE_URL=sqlite:///./app.db
 
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Port for the application
+PORT=8000
 
-Base = declarative_base()
+# CORS allowed origins (comma-separated)
+ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# JWT token expiration in days
+ACCESS_TOKEN_EXPIRE_DAYS=30
