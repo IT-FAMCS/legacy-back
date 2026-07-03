@@ -85,29 +85,69 @@ def can_register_users(position: models.Position) -> bool:
     return position.can_register_users
 
 
+def normalize_position_name(position: models.Position) -> str:
+    return (position.name or "").strip().lower()
+
+
+def is_admin_chair_or_deputy(position: models.Position) -> bool:
+    name = normalize_position_name(position)
+    return (
+        name == "admin"
+        or name == "админ"
+        or name == "председатель"
+        or name == "председатель студсовета"
+        or name.startswith("заместитель председателя")
+        or name.startswith("зам. председателя")
+    )
+
+
+def is_secretary(position: models.Position) -> bool:
+    return normalize_position_name(position) == "секретарь"
+
+
+def is_department_lead(position: models.Position) -> bool:
+    name = normalize_position_name(position)
+    return (
+        name == "руководитель отдела"
+        or name == "руководитель отдела/направления"
+        or name == "заместитель руководителя отдела"
+        or name.startswith("заместитель руководителя")
+    )
+
+
 def can_edit_categories(position: models.Position) -> bool:
-    return position.can_edit_categories
+    return bool(position.can_edit_categories)
 
 
 def can_delete_categories(position: models.Position) -> bool:
-    return position.can_delete_categories
+    # Удаление тем/категорий отключено по требованиям. Функция оставлена
+    # для совместимости со схемами/старыми данными, но API удаления запрещает действие.
+    return False
 
 
 def can_edit_cards(position: models.Position) -> bool:
-    return position.can_edit_cards
+    return bool(position.can_edit_cards) or is_department_lead(position)
 
 
 def can_delete_cards(position: models.Position) -> bool:
-    return position.can_delete_cards
+    return bool(position.can_delete_cards) or is_admin_chair_or_deputy(position)
 
 
 def can_edit_any_user(position: models.Position) -> bool:
-    return position.can_edit_any_user
+    return bool(position.can_edit_any_user)
+
+
+def can_deactivate_users(position: models.Position) -> bool:
+    return is_secretary(position) or is_admin_chair_or_deputy(position)
+
+
+def can_edit_position_permissions(position: models.Position) -> bool:
+    return is_admin_chair_or_deputy(position)
 
 
 def can_manage_departments(position: models.Position) -> bool:
     """Check if position can manage departments"""
-    return position.name in ["admin", "председатель", "заместитель председателя", "председатель студсовета", "секретарь"]
+    return can_deactivate_users(position)
 
 
 def has_higher_authority(manager_position: models.Position, target_position: models.Position) -> bool:
@@ -117,23 +157,92 @@ def has_higher_authority(manager_position: models.Position, target_position: mod
 
 def has_access_to_card(user: models.User, card: models.Card) -> bool:
     # Admin has access to all cards
-    if user.position_ref.name == "admin":
+    if normalize_position_name(user.position_ref) in {"admin", "админ"}:
         return True
     
     if not card.access_positions and not card.access_logins:
         return True
     
     if card.access_positions:
-        allowed_positions = [p.strip() for p in card.access_positions.split(",")]
-        if user.position_ref.name in allowed_positions:
+        allowed_positions = [p.strip().lower() for p in card.access_positions.split(",")]
+        if normalize_position_name(user.position_ref) in allowed_positions:
             return True
     
     if card.access_logins:
-        allowed_logins = [l.strip() for l in card.access_logins.split(",")]
-        if user.login in allowed_logins:
+        allowed_logins = [l.strip().lower() for l in card.access_logins.split(",")]
+        if user.login.lower() in allowed_logins:
             return True
     
     return False
+
+
+def ensure_runtime_permissions() -> None:
+    """Safely update default role permissions without recreating or clearing the DB."""
+    db = SessionLocal()
+    try:
+        updates = {
+            "admin": {
+                "can_register_users": True,
+                "can_edit_categories": True,
+                "can_edit_cards": True,
+                "can_delete_cards": True,
+                "can_edit_any_user": True,
+                "can_manage_positions": True,
+            },
+            "председатель": {
+                "can_register_users": True,
+                "can_edit_categories": True,
+                "can_edit_cards": True,
+                "can_delete_cards": True,
+                "can_edit_any_user": True,
+                "can_manage_positions": True,
+            },
+            "председатель студсовета": {
+                "can_register_users": True,
+                "can_edit_categories": True,
+                "can_edit_cards": True,
+                "can_delete_cards": True,
+                "can_edit_any_user": True,
+                "can_manage_positions": True,
+            },
+            "заместитель председателя": {
+                "can_register_users": True,
+                "can_edit_categories": True,
+                "can_edit_cards": True,
+                "can_delete_cards": True,
+                "can_edit_any_user": True,
+                "can_manage_positions": True,
+            },
+            "секретарь": {
+                "can_register_users": True,
+                "can_edit_categories": True,
+                "can_edit_cards": True,
+                "can_delete_cards": False,
+                "can_edit_any_user": True,
+                "can_manage_positions": False,
+            },
+            "руководитель отдела": {"can_edit_cards": True},
+            "руководитель отдела/направления": {"can_edit_cards": True},
+            "заместитель руководителя отдела": {"can_edit_cards": True},
+        }
+
+        for position_name, values in updates.items():
+            position = db.query(models.Position).filter(models.Position.name == position_name).first()
+            if not position:
+                continue
+            for field, value in values.items():
+                setattr(position, field, value)
+
+        # Удаление тем отключено для всех ролей, чтобы старые флаги не открывали доступ.
+        for position in db.query(models.Position).all():
+            position.can_delete_categories = False
+
+        db.commit()
+    finally:
+        db.close()
+
+
+ensure_runtime_permissions()
 
 
 # ============ DEPENDENCIES ============
@@ -274,10 +383,10 @@ async def update_position(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    if not current_user.position_ref.can_manage_positions:
+    if not can_edit_position_permissions(current_user.position_ref):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Недостаточно прав для редактирования должностей"
+            detail="Недостаточно прав для редактирования доступов должностей"
         )
     
     position = db.query(models.Position).filter(models.Position.id == position_id).first()
@@ -507,6 +616,7 @@ async def register_users_bulk(
 @app.get("/api/users", response_model=List[schemas.UserResponse], summary="Get users list")
 async def get_users(
     department_id: Optional[int] = None,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get users list - available to all authenticated users"""
@@ -553,7 +663,12 @@ async def update_user_data(
         # Admin-level users can edit anyone
         if user_update.position:
             new_position = db.query(models.Position).filter(models.Position.name == user_update.position).first()
-            if new_position and not has_higher_authority(current_user.position_ref, new_position):
+            if not new_position:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Должность не найдена"
+                )
+            if not has_higher_authority(current_user.position_ref, new_position):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Недостаточно прав для изменения этой должности"
@@ -615,6 +730,54 @@ async def change_user_password(
     db.commit()
     db.refresh(target_user)
     return {**target_user.__dict__, "position_name": target_user.position_ref.name}
+
+
+
+def set_user_deactivation_status(
+    target_login: str,
+    deactivated: bool,
+    current_user: models.User,
+    db: Session,
+) -> dict:
+    if not can_deactivate_users(current_user.position_ref):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Недостаточно прав для деактивации пользователей"
+        )
+
+    if target_login == current_user.login:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Нельзя деактивировать собственный аккаунт"
+        )
+
+    target_user = db.query(models.User).filter(models.User.login == target_login).first()
+    if not target_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден")
+
+    target_user.is_deactivated = deactivated
+    target_user.is_active = not deactivated
+    db.commit()
+    db.refresh(target_user)
+    return format_user_response(target_user, db)
+
+
+@app.put("/api/users/{target_login}/deactivate", response_model=schemas.UserResponse, summary="Deactivate user")
+async def deactivate_user(
+    target_login: str,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return set_user_deactivation_status(target_login, True, current_user, db)
+
+
+@app.put("/api/users/{target_login}/activate", response_model=schemas.UserResponse, summary="Activate user")
+async def activate_user(
+    target_login: str,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return set_user_deactivation_status(target_login, False, current_user, db)
 
 
 # ============ CATEGORY ENDPOINTS ============
@@ -696,25 +859,16 @@ async def update_category(
     return category
 
 
-@app.delete("/api/categories/{category_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete category")
+@app.delete("/api/categories/{category_id}", status_code=status.HTTP_405_METHOD_NOT_ALLOWED, summary="Delete category disabled")
 async def delete_category(
     category_id: int,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    if not can_delete_categories(current_user.position_ref):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Недостаточно прав для удаления категорий"
-        )
-    
-    category = db.query(models.Category).filter(models.Category.id == category_id).first()
-    if not category:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Категория не найдена")
-    
-    db.delete(category)
-    db.commit()
-    return None
+    raise HTTPException(
+        status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+        detail="Удаление тем отключено"
+    )
 
 
 # ============ CARD ENDPOINTS ============
