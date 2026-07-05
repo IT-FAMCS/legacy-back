@@ -616,16 +616,34 @@ async def register_users_bulk(
 @app.get("/api/users", response_model=List[schemas.UserResponse], summary="Get users list")
 async def get_users(
     department_id: Optional[int] = None,
+    department: Optional[str] = None,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get users list - available to all authenticated users"""
+    """Get users list - available to all authenticated users.
+
+    department_id is the main filter. department is kept as a backward-compatible
+    alias and may contain either an id or a department name.
+    """
     query = db.query(models.User).join(models.Position)
+
+    resolved_department_id = department_id
+    if resolved_department_id is None and department:
+        if department.isdigit():
+            resolved_department_id = int(department)
+        else:
+            dept = db.query(models.Department).filter(models.Department.name == department).first()
+            if dept:
+                resolved_department_id = dept.id
+            else:
+                return []
+
+    if resolved_department_id:
+        query = query.join(models.UserDepartment).filter(
+            models.UserDepartment.department_id == resolved_department_id
+        )
     
-    if department_id:
-        query = query.join(models.UserDepartment).filter(models.UserDepartment.department_id == department_id)
-    
-    users = query.all()
+    users = query.order_by(models.User.last_name, models.User.first_name, models.User.login).all()
     result = []
     for user in users:
         result.append(format_user_response(user, db))
@@ -705,6 +723,28 @@ async def update_user_data(
     )
 
 
+@app.put("/api/user/me/change-password", summary="Change current user password")
+async def change_own_password(
+    password_data: schemas.OwnPasswordChange,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Change current user's password after checking the current password."""
+    user = db.query(models.User).filter(models.User.id == current_user.id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден")
+
+    if not verify_password(password_data.current_password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Текущий пароль указан неверно"
+        )
+
+    user.password_hash = hash_password(password_data.new_password)
+    db.commit()
+    return {"message": "Пароль успешно изменен"}
+
+
 @app.put("/api/user/change-password/{target_login}", response_model=schemas.UserResponse, summary="Change user password")
 async def change_user_password(
     target_login: str,
@@ -729,7 +769,7 @@ async def change_user_password(
     target_user.password_hash = hash_password(password_data.password)
     db.commit()
     db.refresh(target_user)
-    return {**target_user.__dict__, "position_name": target_user.position_ref.name}
+    return format_user_response(target_user, db)
 
 
 
@@ -1121,7 +1161,7 @@ async def get_department(
 @app.put("/api/departments/{department_id}", response_model=schemas.DepartmentResponse, summary="Update department")
 async def update_department(
     department_id: int,
-    department_update: schemas.DepartmentCreate,
+    department_update: schemas.DepartmentUpdate,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -1134,8 +1174,16 @@ async def update_department(
     department = db.query(models.Department).filter(models.Department.id == department_id).first()
     if not department:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Отдел не найден")
-    
+
     update_data = department_update.dict(exclude_unset=True)
+    if "name" in update_data and update_data["name"] != department.name:
+        existing = db.query(models.Department).filter(models.Department.name == update_data["name"]).first()
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Отдел с таким названием уже существует"
+            )
+
     for field, value in update_data.items():
         setattr(department, field, value)
     

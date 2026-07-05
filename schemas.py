@@ -57,6 +57,12 @@ class DepartmentCreate(BaseModel):
     description: Optional[str] = None
 
 
+class DepartmentUpdate(BaseModel):
+    """Schema for updating a department"""
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    description: Optional[str] = None
+
+
 class DepartmentResponse(BaseModel):
     """Schema for department response"""
     id: int
@@ -125,6 +131,12 @@ class UserUpdate(BaseModel):
 class PasswordChange(BaseModel):
     """Schema for changing user password"""
     password: str = Field(..., min_length=6, description="New password (min 6 characters)")
+
+
+class OwnPasswordChange(BaseModel):
+    """Schema for changing current user's own password"""
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=6)
 
 
 class DepartmentInfo(BaseModel):
