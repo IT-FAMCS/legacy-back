@@ -1126,10 +1126,10 @@ async def get_card_history(
     if not card:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Карточка не найдена")
 
-    if not has_access_to_card(current_user, card):
+    if not can_view_card_activity(current_user.position_ref):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Нет доступа к этой карточке"
+            detail="Недостаточно прав для просмотра истории карточки"
         )
 
     logs = db.query(models.ActivityLog).filter(
