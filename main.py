@@ -4,6 +4,7 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
@@ -38,13 +39,22 @@ def ensure_schema_upgrades() -> None:
     """Add columns introduced after the initial create_all to already-existing
     SQLite databases. create_all() only creates missing tables, it never
     alters existing ones — without this, an existing app.db would keep
-    missing e.g. users.password_changed_at and error out on first use."""
+    missing e.g. users.password_changed_at and error out on first use.
+
+    gunicorn boots several worker processes that each import this module
+    independently, so this can legitimately race: two workers can both see
+    the column missing and both try to ALTER TABLE. SQLite lets only one
+    succeed; the loser must not crash the worker over it."""
     if engine.dialect.name != "sqlite":
         return
     with engine.begin() as conn:
         existing_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()}
         if "password_changed_at" not in existing_columns:
-            conn.exec_driver_sql("ALTER TABLE users ADD COLUMN password_changed_at DATETIME")
+            try:
+                conn.exec_driver_sql("ALTER TABLE users ADD COLUMN password_changed_at DATETIME")
+            except OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
 
 
 ensure_schema_upgrades()
