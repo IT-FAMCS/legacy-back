@@ -43,7 +43,8 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     is_deactivated = Column(Boolean, default=False)
     last_login = Column(DateTime)
-    
+    password_changed_at = Column(DateTime)
+
     position_ref = relationship("Position", back_populates="users")
     visited_categories = relationship("CategoryVisit", back_populates="user", cascade="all, delete-orphan")
     visited_cards = relationship("CardVisit", back_populates="user", cascade="all, delete-orphan")
@@ -120,6 +121,28 @@ class CardVisit(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     card_id = Column(Integer, ForeignKey("cards.id"), nullable=False)
     visited_at = Column(DateTime, default=datetime.utcnow)
-    
+
     user = relationship("User", back_populates="visited_cards")
     card = relationship("Card", back_populates="visits")
+
+
+class ActivityLog(Base):
+    """Audit trail of create/update/delete actions performed by users.
+
+    Deliberately not linked via a cascading relationship from Card/Category,
+    so entries survive deletion of the entity they describe (entity_id is a
+    plain column, not an ORM relationship) — the whole point is to keep a
+    record of "user X deleted card Y" after Y is gone.
+    """
+    __tablename__ = "activity_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    action = Column(String, nullable=False)          # "create" | "update" | "delete"
+    entity_type = Column(String, nullable=False)      # "card"
+    entity_id = Column(Integer)
+    entity_title = Column(String)                     # snapshot, survives entity edits/deletion
+    details = Column(Text)                            # human-readable summary of what changed
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User")

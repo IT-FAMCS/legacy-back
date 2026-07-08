@@ -33,6 +33,22 @@ app = FastAPI(
 # Create all tables
 models.Base.metadata.create_all(bind=engine)
 
+
+def ensure_schema_upgrades() -> None:
+    """Add columns introduced after the initial create_all to already-existing
+    SQLite databases. create_all() only creates missing tables, it never
+    alters existing ones — without this, an existing app.db would keep
+    missing e.g. users.password_changed_at and error out on first use."""
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.begin() as conn:
+        existing_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()}
+        if "password_changed_at" not in existing_columns:
+            conn.exec_driver_sql("ALTER TABLE users ADD COLUMN password_changed_at DATETIME")
+
+
+ensure_schema_upgrades()
+
 # ============ CORS CONFIGURATION ============
 # Список разрешённых origin'ов берётся из ALLOWED_ORIGINS (через запятую).
 # В проде фронт и API на одном домене (nginx проксирует /api), поэтому CORS по сути
@@ -135,6 +151,12 @@ def can_delete_cards(position: models.Position) -> bool:
 
 def can_edit_any_user(position: models.Position) -> bool:
     return bool(position.can_edit_any_user)
+
+
+def can_view_card_activity(position: models.Position) -> bool:
+    """Card create/update/delete activity log is admin/chair/deputy-only, not
+    the broader can_edit_any_user audience (secretaries, dept heads, etc.)."""
+    return is_admin_chair_or_deputy(position)
 
 
 def can_deactivate_users(position: models.Position) -> bool:
@@ -508,6 +530,7 @@ def create_user_with_relations(
     new_user = models.User(
         login=user_data.login,
         password_hash=hash_password(user_data.password),
+        password_changed_at=datetime.utcnow(),
         first_name=user_data.first_name,
         last_name=user_data.last_name,
         middle_name=user_data.middle_name,
@@ -741,6 +764,7 @@ async def change_own_password(
         )
 
     user.password_hash = hash_password(password_data.new_password)
+    user.password_changed_at = datetime.utcnow()
     db.commit()
     return {"message": "Пароль успешно изменен"}
 
@@ -767,6 +791,7 @@ async def change_user_password(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден")
     
     target_user.password_hash = hash_password(password_data.password)
+    target_user.password_changed_at = datetime.utcnow()
     db.commit()
     db.refresh(target_user)
     return format_user_response(target_user, db)
@@ -913,6 +938,52 @@ async def delete_category(
 
 # ============ CARD ENDPOINTS ============
 
+def log_activity(
+    db: Session,
+    user_id: int,
+    action: str,
+    entity_type: str,
+    entity_id: Optional[int],
+    entity_title: Optional[str],
+    details: Optional[str] = None,
+) -> None:
+    db.add(models.ActivityLog(
+        user_id=user_id,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        entity_title=entity_title,
+        details=details,
+    ))
+
+
+def describe_card_changes(card: models.Card, update_data: dict, db: Session) -> Optional[str]:
+    """Human-readable Russian summary of what changed in a card update."""
+    parts = []
+
+    if "title" in update_data and update_data["title"] != card.title:
+        parts.append(f"заголовок: «{card.title}» → «{update_data['title']}»")
+
+    if "category_id" in update_data and update_data["category_id"] != card.category_id:
+        old_category = db.query(models.Category).filter(models.Category.id == card.category_id).first()
+        new_category = db.query(models.Category).filter(models.Category.id == update_data["category_id"]).first()
+        parts.append(
+            f"тема: «{old_category.name if old_category else '?'}» → "
+            f"«{new_category.name if new_category else '?'}»"
+        )
+
+    if "access_positions" in update_data and update_data["access_positions"] != card.access_positions:
+        parts.append("доступ по должностям")
+
+    if "access_logins" in update_data and update_data["access_logins"] != card.access_logins:
+        parts.append("доступ по логинам")
+
+    if "content" in update_data and update_data["content"] != card.content:
+        parts.append("содержимое")
+
+    return "Изменено: " + ", ".join(parts) if parts else None
+
+
 @app.post("/api/cards", response_model=schemas.CardResponse, status_code=status.HTTP_201_CREATED, summary="Create card")
 async def create_card(
     card: schemas.CardCreate,
@@ -924,11 +995,11 @@ async def create_card(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Недостаточно прав для создания карточек"
         )
-    
+
     category = db.query(models.Category).filter(models.Category.id == card.category_id).first()
     if not category:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Категория не найдена")
-    
+
     new_card = models.Card(
         title=card.title,
         content=card.content,
@@ -936,11 +1007,13 @@ async def create_card(
         access_positions=card.access_positions,
         access_logins=card.access_logins
     )
-    
+
     db.add(new_card)
+    db.flush()
+    log_activity(db, current_user.id, "create", "card", new_card.id, new_card.title)
     db.commit()
     db.refresh(new_card)
-    
+
     return {**new_card.__dict__, "category_name": category.name}
 
 
@@ -1004,16 +1077,20 @@ async def update_card(
     card = db.query(models.Card).filter(models.Card.id == card_id).first()
     if not card:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Карточка не найдена")
-    
+
     update_data = card_update.dict(exclude_unset=True)
+    details = describe_card_changes(card, update_data, db)
     for field, value in update_data.items():
         setattr(card, field, value)
-    
+
+    if update_data:
+        log_activity(db, current_user.id, "update", "card", card.id, card.title, details)
+
     db.commit()
     db.refresh(card)
-    
+
     category = db.query(models.Category).filter(models.Category.id == card.category_id).first()
-    
+
     return {**card.__dict__, "category_name": category.name if category else None}
 
 
@@ -1028,14 +1105,54 @@ async def delete_card(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Недостаточно прав для удаления карточек"
         )
-    
+
     card = db.query(models.Card).filter(models.Card.id == card_id).first()
     if not card:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Карточка не найдена")
-    
+
+    log_activity(db, current_user.id, "delete", "card", card.id, card.title)
     db.delete(card)
     db.commit()
     return None
+
+
+@app.get("/api/cards/{card_id}/history", response_model=List[schemas.ActivityLogResponse], summary="Get card edit history")
+async def get_card_history(
+    card_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    card = db.query(models.Card).filter(models.Card.id == card_id).first()
+    if not card:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Карточка не найдена")
+
+    if not has_access_to_card(current_user, card):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Нет доступа к этой карточке"
+        )
+
+    logs = db.query(models.ActivityLog).filter(
+        models.ActivityLog.entity_type == "card",
+        models.ActivityLog.entity_id == card_id
+    ).order_by(models.ActivityLog.created_at.desc()).limit(100).all()
+
+    result = []
+    for log in logs:
+        actor = db.query(models.User).filter(models.User.id == log.user_id).first()
+        result.append({
+            "id": log.id,
+            "user_id": log.user_id,
+            "user_login": actor.login if actor else None,
+            "user_name": f"{actor.last_name} {actor.first_name}" if actor else None,
+            "action": log.action,
+            "entity_type": log.entity_type,
+            "entity_id": log.entity_id,
+            "entity_title": log.entity_title,
+            "details": log.details,
+            "created_at": log.created_at,
+        })
+    return result
 
 
 # ============ VISIT HISTORY ENDPOINTS ============
@@ -1103,6 +1220,62 @@ async def get_card_visits(
             "visited_at": visit.visited_at
         })
     return result
+
+
+# ============ ACTIVITY LOG ENDPOINTS ============
+
+@app.get("/api/activity/cards", response_model=List[schemas.ActivityLogResponse], summary="Get a user's card create/edit/delete activity")
+async def get_card_activity(
+    user_id: Optional[int] = None,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get a user's card activity log (create/update/delete).
+    Only visible to admin/председатель/заместители председателя — a narrower
+    audience than can_edit_any_user, on purpose (this is an oversight tool, not
+    a general user-management permission).
+    - If user_id is not provided, returns current user's activity
+    - If user_id is provided, returns that user's activity
+    """
+    if not can_view_card_activity(current_user.position_ref):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Недостаточно прав для просмотра активности по карточкам"
+        )
+
+    if user_id is not None:
+        target_user = db.query(models.User).filter(models.User.id == user_id).first()
+        if not target_user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Пользователь не найден"
+            )
+        activity_user_id = user_id
+    else:
+        activity_user_id = current_user.id
+
+    logs = db.query(models.ActivityLog).filter(
+        models.ActivityLog.user_id == activity_user_id,
+        models.ActivityLog.entity_type == "card"
+    ).order_by(models.ActivityLog.created_at.desc()).limit(50).all()
+
+    actor = db.query(models.User).filter(models.User.id == activity_user_id).first()
+    return [
+        {
+            "id": log.id,
+            "user_id": log.user_id,
+            "user_login": actor.login if actor else None,
+            "user_name": f"{actor.last_name} {actor.first_name}" if actor else None,
+            "action": log.action,
+            "entity_type": log.entity_type,
+            "entity_id": log.entity_id,
+            "entity_title": log.entity_title,
+            "details": log.details,
+            "created_at": log.created_at,
+        }
+        for log in logs
+    ]
 
 
 # ============ DEPARTMENT ENDPOINTS ============

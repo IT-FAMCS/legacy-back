@@ -165,7 +165,8 @@ class UserResponse(BaseModel):
     is_active: bool
     is_deactivated: bool
     last_login: Optional[datetime] = None
-    
+    password_changed_at: Optional[datetime] = None
+
     class Config:
         from_attributes = True
 
@@ -250,7 +251,26 @@ class VisitResponse(BaseModel):
     item_id: int
     item_name: str
     visited_at: datetime
-    
+
+    class Config:
+        from_attributes = True
+
+
+# ============ ACTIVITY LOG SCHEMAS ============
+
+class ActivityLogResponse(BaseModel):
+    """Schema for an audit-trail entry (who did what to which card, and when)"""
+    id: int
+    user_id: int
+    user_login: Optional[str] = None
+    user_name: Optional[str] = None
+    action: str
+    entity_type: str
+    entity_id: Optional[int] = None
+    entity_title: Optional[str] = None
+    details: Optional[str] = None
+    created_at: datetime
+
     class Config:
         from_attributes = True
 
