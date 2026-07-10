@@ -1,9 +1,13 @@
-from database import SessionLocal, engine
+from database import SessionLocal, engine, ensure_schema_upgrades
 from passlib.context import CryptContext
 import models
 
-# Create all tables first
+# Create all tables first, then patch any that already existed before this
+# column/table was added — this script runs before gunicorn/main.py in the
+# Dockerfile CMD and queries models.User directly below, so it needs the
+# patch applied here too, not just in main.py.
 models.Base.metadata.create_all(bind=engine)
+ensure_schema_upgrades()
 
 pwd_context = CryptContext(schemes=['bcrypt'], deprecated='auto')
 db = SessionLocal()
