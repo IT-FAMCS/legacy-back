@@ -663,6 +663,13 @@ async def get_current_user_info(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    # The frontend calls this once per app load (see useLoadUser), which makes
+    # it a reasonable proxy for "the user actually opened the app" — unlike
+    # last_login, which only moves when they type a password and can otherwise
+    # sit unchanged for the whole 30-day JWT lifetime.
+    current_user.last_seen_at = datetime.utcnow()
+    db.commit()
+    db.refresh(current_user)
     return format_user_response(current_user, db)
 
 

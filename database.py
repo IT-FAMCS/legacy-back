@@ -43,15 +43,23 @@ def ensure_schema_upgrades() -> None:
     the loser must not crash over it."""
     if engine.dialect.name != "sqlite":
         return
+
+    users_columns_to_add = {
+        "password_changed_at": "DATETIME",
+        "last_seen_at": "DATETIME",
+    }
+
     with engine.begin() as conn:
         existing_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()}
         if not existing_columns:
             # users table doesn't exist yet (fresh DB) — create_all() will
             # make it with the current schema already, nothing to patch.
             return
-        if "password_changed_at" not in existing_columns:
+        for column, sql_type in users_columns_to_add.items():
+            if column in existing_columns:
+                continue
             try:
-                conn.exec_driver_sql("ALTER TABLE users ADD COLUMN password_changed_at DATETIME")
+                conn.exec_driver_sql(f"ALTER TABLE users ADD COLUMN {column} {sql_type}")
             except OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise

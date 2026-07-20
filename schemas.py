@@ -165,6 +165,7 @@ class UserResponse(BaseModel):
     is_active: bool
     is_deactivated: bool
     last_login: Optional[datetime] = None
+    last_seen_at: Optional[datetime] = None
     password_changed_at: Optional[datetime] = None
 
     class Config:

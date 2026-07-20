@@ -42,7 +42,8 @@ class User(Base):
     
     is_active = Column(Boolean, default=True)
     is_deactivated = Column(Boolean, default=False)
-    last_login = Column(DateTime)
+    last_login = Column(DateTime)          # last time the user authenticated (typed a password)
+    last_seen_at = Column(DateTime)        # last time the app was actually open for this user
     password_changed_at = Column(DateTime)
 
     position_ref = relationship("Position", back_populates="users")
