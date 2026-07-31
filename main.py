@@ -144,6 +144,16 @@ def can_view_card_activity(position: models.Position) -> bool:
     return is_admin_chair_or_deputy(position)
 
 
+def can_comment_cards(position: models.Position) -> bool:
+    """Margin comments on card content. Deliberately a PURE flag check, no
+    hardcoded name OR-clause like can_edit_cards/can_delete_cards above — this
+    permission is meant to be entirely admin-editable via the Positions page,
+    not partially locked to code. Defaults are seeded once (see
+    database.ensure_schema_upgrades / seed_db_v2.py) but never re-applied on
+    restart, so an admin's later edit here actually sticks."""
+    return bool(position.can_comment_cards)
+
+
 def can_deactivate_users(position: models.Position) -> bool:
     return is_secretary(position) or is_admin_chair_or_deputy(position)
 
@@ -1145,6 +1155,127 @@ async def get_card_history(
             "created_at": log.created_at,
         })
     return result
+
+
+def serialize_card_comment(comment: models.CardComment) -> dict:
+    return {
+        "id": comment.id,
+        "card_id": comment.card_id,
+        "author_id": comment.author_id,
+        "author_login": comment.author.login if comment.author else None,
+        "author_name": f"{comment.author.last_name} {comment.author.first_name}" if comment.author else None,
+        "quoted_text": comment.quoted_text,
+        "body": comment.body,
+        "resolved": comment.resolved,
+        "resolved_by_name": f"{comment.resolved_by.last_name} {comment.resolved_by.first_name}" if comment.resolved_by else None,
+        "resolved_at": comment.resolved_at,
+        "created_at": comment.created_at,
+    }
+
+
+@app.get("/api/cards/{card_id}/comments", response_model=List[schemas.CardCommentResponse], summary="Get margin comments on a card")
+async def get_card_comments(
+    card_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    card = db.query(models.Card).filter(models.Card.id == card_id).first()
+    if not card:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Карточка не найдена")
+
+    if not has_access_to_card(current_user, card):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этой карточке")
+
+    if not can_comment_cards(current_user.position_ref):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Недостаточно прав для просмотра комментариев")
+
+    comments = db.query(models.CardComment).filter(
+        models.CardComment.card_id == card_id
+    ).order_by(models.CardComment.created_at.asc()).all()
+
+    return [serialize_card_comment(c) for c in comments]
+
+
+@app.post("/api/cards/{card_id}/comments", response_model=schemas.CardCommentResponse, status_code=status.HTTP_201_CREATED, summary="Leave a margin comment on a card")
+async def create_card_comment(
+    card_id: int,
+    comment_data: schemas.CardCommentCreate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    card = db.query(models.Card).filter(models.Card.id == card_id).first()
+    if not card:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Карточка не найдена")
+
+    if not has_access_to_card(current_user, card):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этой карточке")
+
+    if not can_comment_cards(current_user.position_ref):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Недостаточно прав для комментирования карточек")
+
+    comment = models.CardComment(
+        card_id=card_id,
+        author_id=current_user.id,
+        quoted_text=comment_data.quoted_text,
+        body=comment_data.body,
+    )
+    db.add(comment)
+    db.commit()
+    db.refresh(comment)
+
+    return serialize_card_comment(comment)
+
+
+@app.patch("/api/comments/{comment_id}", response_model=schemas.CardCommentResponse, summary="Resolve or un-resolve a card comment")
+async def update_card_comment(
+    comment_id: int,
+    update_data: schemas.CardCommentUpdate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    comment = db.query(models.CardComment).filter(models.CardComment.id == comment_id).first()
+    if not comment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Комментарий не найден")
+
+    if not has_access_to_card(current_user, comment.card):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этой карточке")
+
+    if not can_comment_cards(current_user.position_ref):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Недостаточно прав для изменения комментариев")
+
+    comment.resolved = update_data.resolved
+    if update_data.resolved:
+        comment.resolved_by_id = current_user.id
+        comment.resolved_at = datetime.utcnow()
+    else:
+        comment.resolved_by_id = None
+        comment.resolved_at = None
+
+    db.commit()
+    db.refresh(comment)
+
+    return serialize_card_comment(comment)
+
+
+@app.delete("/api/comments/{comment_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a card comment")
+async def delete_card_comment(
+    comment_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    comment = db.query(models.CardComment).filter(models.CardComment.id == comment_id).first()
+    if not comment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Комментарий не найден")
+
+    if not has_access_to_card(current_user, comment.card):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к этой карточке")
+
+    if comment.author_id != current_user.id and not is_admin_chair_or_deputy(current_user.position_ref):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Недостаточно прав для удаления этого комментария")
+
+    db.delete(comment)
+    db.commit()
+    return None
 
 
 # ============ VISIT HISTORY ENDPOINTS ============

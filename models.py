@@ -17,8 +17,9 @@ class Position(Base):
     can_delete_cards = Column(Boolean, default=False)
     can_edit_any_user = Column(Boolean, default=False)
     can_manage_positions = Column(Boolean, default=False)
+    can_comment_cards = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     users = relationship("User", back_populates="position_ref")
 
 
@@ -98,9 +99,10 @@ class Card(Base):
     
     access_positions = Column(String)
     access_logins = Column(String)
-    
+
     category = relationship("Category", back_populates="cards")
     visits = relationship("CardVisit", back_populates="card", cascade="all, delete-orphan")
+    comments = relationship("CardComment", back_populates="card", cascade="all, delete-orphan")
 
 
 class CategoryVisit(Base):
@@ -146,4 +148,26 @@ class ActivityLog(Base):
     details = Column(Text)                            # human-readable summary of what changed
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    user = relationship("User")
+
+class CardComment(Base):
+    """Margin comment left on a quoted excerpt of a card's content.
+
+    Unlike ActivityLog, this DOES cascade with its Card (see Card.comments) —
+    a comment anchored to a specific passage has no purpose once the card
+    itself is gone, unlike an audit-trail entry.
+    """
+    __tablename__ = "card_comments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    card_id = Column(Integer, ForeignKey("cards.id"), nullable=False)
+    author_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    quoted_text = Column(Text, nullable=False)
+    body = Column(Text, nullable=False)
+    resolved = Column(Boolean, default=False)
+    resolved_by_id = Column(Integer, ForeignKey("users.id"))
+    resolved_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    card = relationship("Card", back_populates="comments")
+    author = relationship("User", foreign_keys=[author_id])
+    resolved_by = relationship("User", foreign_keys=[resolved_by_id])

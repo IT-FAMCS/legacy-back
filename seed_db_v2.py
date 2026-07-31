@@ -24,6 +24,7 @@ positions_data = [
         "can_delete_cards": True,
         "can_edit_any_user": True,
         "can_manage_positions": True,
+        "can_comment_cards": True,
     },
     {
         "name": "председатель",
@@ -35,6 +36,7 @@ positions_data = [
         "can_delete_cards": True,
         "can_edit_any_user": True,
         "can_manage_positions": True,
+        "can_comment_cards": True,
     },
     {
         "name": "председатель студсовета",
@@ -46,6 +48,7 @@ positions_data = [
         "can_delete_cards": True,
         "can_edit_any_user": True,
         "can_manage_positions": True,
+        "can_comment_cards": True,
     },
     {
         "name": "заместитель председателя",
@@ -57,6 +60,7 @@ positions_data = [
         "can_delete_cards": True,
         "can_edit_any_user": True,
         "can_manage_positions": True,
+        "can_comment_cards": True,
     },
     {
         "name": "секретарь",
@@ -79,6 +83,7 @@ positions_data = [
         "can_delete_cards": False,
         "can_edit_any_user": False,
         "can_manage_positions": False,
+        "can_comment_cards": True,
     },
     {
         "name": "заместитель руководителя отдела",
@@ -90,6 +95,7 @@ positions_data = [
         "can_delete_cards": False,
         "can_edit_any_user": False,
         "can_manage_positions": False,
+        "can_comment_cards": True,
     },
     {
         "name": "участник",

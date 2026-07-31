@@ -16,6 +16,7 @@ class PositionCreate(BaseModel):
     can_delete_cards: bool = False
     can_edit_any_user: bool = False
     can_manage_positions: bool = False
+    can_comment_cards: bool = False
 
 
 class PositionUpdate(BaseModel):
@@ -29,6 +30,7 @@ class PositionUpdate(BaseModel):
     can_delete_cards: Optional[bool] = None
     can_edit_any_user: Optional[bool] = None
     can_manage_positions: Optional[bool] = None
+    can_comment_cards: Optional[bool] = None
 
 
 class PositionResponse(BaseModel):
@@ -43,8 +45,9 @@ class PositionResponse(BaseModel):
     can_delete_cards: bool
     can_edit_any_user: bool
     can_manage_positions: bool
+    can_comment_cards: bool
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
 
@@ -270,6 +273,37 @@ class ActivityLogResponse(BaseModel):
     entity_id: Optional[int] = None
     entity_title: Optional[str] = None
     details: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ============ CARD COMMENT SCHEMAS ============
+
+class CardCommentCreate(BaseModel):
+    """Schema for leaving a margin comment on a quoted excerpt of a card"""
+    quoted_text: str = Field(..., min_length=1, max_length=4000)
+    body: str = Field(..., min_length=1, max_length=4000)
+
+
+class CardCommentUpdate(BaseModel):
+    """Schema for toggling a comment's resolved state"""
+    resolved: bool
+
+
+class CardCommentResponse(BaseModel):
+    """Schema for a card comment"""
+    id: int
+    card_id: int
+    author_id: int
+    author_login: Optional[str] = None
+    author_name: Optional[str] = None
+    quoted_text: str
+    body: str
+    resolved: bool
+    resolved_by_name: Optional[str] = None
+    resolved_at: Optional[datetime] = None
     created_at: datetime
 
     class Config:

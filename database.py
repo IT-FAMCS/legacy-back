@@ -63,3 +63,39 @@ def ensure_schema_upgrades() -> None:
             except OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
+
+    with engine.begin() as conn:
+        existing_position_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(positions)").fetchall()}
+        if not existing_position_columns:
+            # positions table doesn't exist yet (fresh DB) — create_all()
+            # already made it with the current schema, nothing to patch.
+            return
+
+        if "can_comment_cards" not in existing_position_columns:
+            try:
+                conn.exec_driver_sql("ALTER TABLE positions ADD COLUMN can_comment_cards BOOLEAN DEFAULT 0")
+            except OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+            else:
+                # One-time default for an EXISTING (pre-upgrade) database only —
+                # never re-applied on later runs, unlike main.py's
+                # ensure_runtime_permissions(), so an admin's later edit via the
+                # Positions page sticks across restarts/deploys. Mirrors the
+                # same name-family matching as is_admin_chair_or_deputy() /
+                # is_department_lead() in main.py (duplicated here in raw SQL —
+                # this module can't import main.py without a circular import).
+                conn.exec_driver_sql(
+                    """
+                    UPDATE positions SET can_comment_cards = 1
+                    WHERE lower(trim(name)) IN (
+                        'admin', 'админ',
+                        'председатель', 'председатель студсовета',
+                        'руководитель отдела', 'руководитель отдела/направления',
+                        'заместитель руководителя отдела'
+                    )
+                    OR lower(trim(name)) LIKE 'заместитель председателя%'
+                    OR lower(trim(name)) LIKE 'зам. председателя%'
+                    OR lower(trim(name)) LIKE 'заместитель руководителя%'
+                    """
+                )
