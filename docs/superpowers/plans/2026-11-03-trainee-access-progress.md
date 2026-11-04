@@ -1,0 +1,14 @@
+﻿# SDD ledger — plan: docs/superpowers/plans/2026-11-03-trainee-access.md
+Spec approved by user: давай, 2026-11-03.
+Execution: inline, feature branches in both repositories; no worktree needed for this clean code checkout. Original app.db was already modified and must remain untouched.
+Pre-flight Task 1 -> Task 2: shared endpoint names and response schemas defined in plan; separate trainee namespace/storage avoids existing member API changes.
+Ruling: execute the approved work continuously rather than requesting another plan approval — user explicitly authorized implementation.
+Environment: Python venv launcher broken; preparing isolated runtime. Frontend direct node --preserve-symlinks --preserve-symlinks-main runs tsc successfully; npm wrapper cannot resolve profile paths in sandbox.
+Task 1: complete — 14 integration tests pass on temporary SQLite. Ruling: use a dependency-free ASGI test driver because HTTPX is absent and network package installation is blocked. Fixed test clock comparison to aware UTC; production token expiry was correct.
+Task 1 final verification: 16/16 tests pass, including concurrent initial generation/rotation and missing exp/credentials. Local app.db SHA256 unchanged: 812E8A5B5BBE16E1DA672ABC0F295F5D73A6734611CD61C718F23770DE9C9CC0.
+Task 2: complete — 7/7 frontend tests, TypeScript, ESLint and Vite production build pass. Actual Chrome against isolated backend validates guest entry, wrong code, filtered cards, safe Markdown, no account/logout, session reload, member switching, card sharing checkbox persistence, code management, expired/revoked session redirects, new code, secretary denied and responsive desktop/phone layouts. No runtime exceptions.
+Final review: independent /root/review_trainee reviewed both uncommitted repositories; no blocking findings. Recommendation to cover integrated guest lifecycle was addressed with actual browser smoke tests.
+Final: fixed inconsistent role-name whitespace normalization between frontend and backend — manager visibility regression test failed for ' ADMIN ', trim() made it pass; full frontend suite green.
+Task 3: complete — README/AGENT documentation and generated-asset prompt recorded. No push/deployment or changes to original database. Feature branches retained for review; implementation left uncommitted.
+Environment notes: original npm wrapper cannot resolve user-profile paths in sandbox; used direct node --preserve-symlinks --preserve-symlinks-main. Node 20.15.1 predates Vite's supported 20.19+ floor; direct builds pass. Existing large-chunk warning remains. Python system 3.12 works with existing venv packages via PYTHONPATH. ASGI test driver has no extra dependencies.
+Execution rulings recap: continuous implementation follows user's authorization; use isolated temporary DB tests rather than the real app.db; dependency-free ASGI driver replaces unavailable HTTPX; no changes to feature scope or access policy. Deferred minors: none.

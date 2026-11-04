@@ -99,10 +99,21 @@ class Card(Base):
     
     access_positions = Column(String)
     access_logins = Column(String)
+    trainee_access = Column(Boolean, nullable=False, default=False, server_default="0")
 
     category = relationship("Category", back_populates="cards")
     visits = relationship("CardVisit", back_populates="card", cascade="all, delete-orphan")
     comments = relationship("CardComment", back_populates="card", cascade="all, delete-orphan")
+
+
+class TraineeCode(Base):
+    """Singleton (id=1), shared by all workers; version revokes guest sessions."""
+    __tablename__ = "trainee_code"
+
+    id = Column(Integer, primary_key=True)
+    code = Column(String, nullable=False)
+    version = Column(String, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 class CategoryVisit(Base):

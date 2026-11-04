@@ -221,6 +221,7 @@ class CardCreate(BaseModel):
     category_id: int
     access_positions: Optional[str] = None  # Comma-separated positions
     access_logins: Optional[str] = None     # Comma-separated logins
+    trainee_access: bool = False
 
 
 class CardUpdate(BaseModel):
@@ -230,6 +231,7 @@ class CardUpdate(BaseModel):
     category_id: Optional[int] = None
     access_positions: Optional[str] = None
     access_logins: Optional[str] = None
+    trainee_access: bool = False  # exclude_unset keeps omitted values unchanged
 
 
 class CardResponse(BaseModel):
@@ -241,6 +243,7 @@ class CardResponse(BaseModel):
     category_name: Optional[str] = None
     access_positions: Optional[str] = None
     access_logins: Optional[str] = None
+    trainee_access: bool = False
     created_at: datetime
     
     class Config:
