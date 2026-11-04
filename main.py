@@ -278,7 +278,7 @@ async def get_current_user(
         token = credentials.credentials
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         login: str = payload.get("sub")
-        if login is None:
+        if login is None or payload.get("type", "member") != "member":
             raise credentials_exception
     except JWTError:
         raise credentials_exception
@@ -294,6 +294,17 @@ async def get_current_user(
         )
     
     return user
+
+
+# Keep accountless sessions out of all member-only dependencies and routes.
+from trainee_access import create_trainee_router
+
+app.include_router(create_trainee_router(
+    get_current_user=get_current_user,
+    can_manage_code=is_admin_chair_or_deputy,
+    secret_key=SECRET_KEY,
+    algorithm=ALGORITHM,
+))
 
 
 # ============ AUTH ENDPOINTS ============
@@ -980,6 +991,9 @@ def describe_card_changes(card: models.Card, update_data: dict, db: Session) -> 
     if "access_logins" in update_data and update_data["access_logins"] != card.access_logins:
         parts.append("доступ по логинам")
 
+    if "trainee_access" in update_data and update_data["trainee_access"] != card.trainee_access:
+        parts.append("доступ стажёрам включён" if update_data["trainee_access"] else "доступ стажёрам выключен")
+
     if "content" in update_data and update_data["content"] != card.content:
         parts.append("содержимое")
 
@@ -1007,7 +1021,8 @@ async def create_card(
         content=card.content,
         category_id=card.category_id,
         access_positions=card.access_positions,
-        access_logins=card.access_logins
+        access_logins=card.access_logins,
+        trainee_access=card.trainee_access,
     )
 
     db.add(new_card)

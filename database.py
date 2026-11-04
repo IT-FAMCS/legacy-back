@@ -99,3 +99,12 @@ def ensure_schema_upgrades() -> None:
                     OR lower(trim(name)) LIKE 'заместитель руководителя%'
                     """
                 )
+
+    with engine.begin() as conn:
+        card_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(cards)").fetchall()}
+        if card_columns and "trainee_access" not in card_columns:
+            try:
+                conn.exec_driver_sql("ALTER TABLE cards ADD COLUMN trainee_access BOOLEAN NOT NULL DEFAULT 0")
+            except OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
