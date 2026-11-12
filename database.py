@@ -47,6 +47,8 @@ def ensure_schema_upgrades() -> None:
     users_columns_to_add = {
         "password_changed_at": "DATETIME",
         "last_seen_at": "DATETIME",
+        "phone": "VARCHAR(40)",
+        "education_format": "VARCHAR(16)",
     }
 
     with engine.begin() as conn:
@@ -105,6 +107,15 @@ def ensure_schema_upgrades() -> None:
         if card_columns and "trainee_access" not in card_columns:
             try:
                 conn.exec_driver_sql("ALTER TABLE cards ADD COLUMN trainee_access BOOLEAN NOT NULL DEFAULT 0")
+            except OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+
+    with engine.begin() as conn:
+        equipment_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(equipment_items)").fetchall()}
+        if equipment_columns and "deleted_at" not in equipment_columns:
+            try:
+                conn.exec_driver_sql("ALTER TABLE equipment_items ADD COLUMN deleted_at DATETIME")
             except OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise

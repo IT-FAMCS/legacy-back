@@ -1,5 +1,6 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List
+import re
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional, List, Literal
 from datetime import datetime
 
 
@@ -84,7 +85,32 @@ class UserDepartmentCreate(BaseModel):
 
 # ============ USER SCHEMAS ============
 
-class UserRegister(BaseModel):
+class AccountContactFields(BaseModel):
+    phone: Optional[str] = Field(default=None, max_length=40)
+    education_format: Optional[Literal["бюджет", "платное"]] = None
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def valid_phone(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("Телефон должен быть строкой")
+        value = value.strip()
+        if not value:
+            return None
+        digits = sum(char.isdigit() for char in value)
+        if not re.fullmatch(r"[+0-9 ()-]+", value) or not 7 <= digits <= 15:
+            raise ValueError("Телефон: от 7 до 15 цифр; допустимы +, пробелы, скобки и дефисы")
+        return value
+
+    @field_validator("education_format", mode="before")
+    @classmethod
+    def optional_education(cls, value):
+        return None if value == "" else value
+
+
+class UserRegister(AccountContactFields):
     """Schema for user registration (by admin)"""
     login: str = Field(..., min_length=3, max_length=50)
     password: str = Field(..., min_length=6)
@@ -116,7 +142,7 @@ class UserLogin(BaseModel):
     password: str
 
 
-class UserUpdate(BaseModel):
+class UserUpdate(AccountContactFields):
     """Schema for updating user data"""
     first_name: Optional[str] = None
     last_name: Optional[str] = None
@@ -151,7 +177,7 @@ class DepartmentInfo(BaseModel):
         from_attributes = True
 
 
-class UserResponse(BaseModel):
+class UserResponse(AccountContactFields):
     """Schema for user response"""
     id: int
     login: str
