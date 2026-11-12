@@ -307,6 +307,23 @@ app.include_router(create_trainee_router(
 ))
 
 
+# Equipment management is deliberately narrower than general user-edit flags.
+from equipment import create_equipment_router
+
+def can_manage_equipment(position: models.Position) -> bool:
+    name = normalize_position_name(position)
+    return is_admin_chair_or_deputy(position) or name in {
+        "руководитель отдела", "руководитель отдела/направления",
+        "заместитель руководителя отдела", "заместитель руководителя отдела/направления",
+    } or name.startswith("заместитель руководителя отдела ")
+
+
+app.include_router(create_equipment_router(
+    get_current_user=get_current_user,
+    can_manage=can_manage_equipment,
+))
+
+
 # ============ AUTH ENDPOINTS ============
 
 @app.post("/api/login", response_model=schemas.Token, summary="User login")

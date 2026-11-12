@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, CheckConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
@@ -182,3 +182,40 @@ class CardComment(Base):
     card = relationship("Card", back_populates="comments")
     author = relationship("User", foreign_keys=[author_id])
     resolved_by = relationship("User", foreign_keys=[resolved_by_id])
+
+
+class EquipmentLocation(Base):
+    __tablename__ = "equipment_locations"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(120), nullable=False)
+    name_key = Column(String(120), unique=True, nullable=False)
+
+
+class EquipmentItem(Base):
+    __tablename__ = "equipment_items"
+    __table_args__ = (CheckConstraint(
+        "(holder_user_id IS NOT NULL AND location_id IS NULL AND taken_at IS NOT NULL) OR "
+        "(holder_user_id IS NULL AND location_id IS NOT NULL AND taken_at IS NULL)",
+        name="equipment_exactly_one_holder"),)
+    id = Column(Integer, primary_key=True)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=False, default="")
+    holder_user_id = Column(Integer, ForeignKey("users.id"))
+    location_id = Column(Integer, ForeignKey("equipment_locations.id"))
+    taken_at = Column(DateTime)
+    version = Column(Integer, nullable=False, default=1)
+    holder_user = relationship("User")
+    location = relationship("EquipmentLocation")
+
+
+class EquipmentHistory(Base):
+    __tablename__ = "equipment_history"
+    id = Column(Integer, primary_key=True)
+    item_id = Column(Integer, ForeignKey("equipment_items.id"), nullable=False, index=True)
+    action = Column(String(16), nullable=False)
+    actor_name = Column(String, nullable=False)
+    actor_login = Column(String, nullable=False)
+    holder_name = Column(String, nullable=False)
+    holder_login = Column(String)
+    taken_at = Column(DateTime)
+    recorded_at = Column(DateTime, nullable=False)
