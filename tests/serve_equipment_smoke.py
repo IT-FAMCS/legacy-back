@@ -18,9 +18,12 @@ if __name__ == "__main__":
 
         with database.SessionLocal() as db:
             password = main.hash_password("smoke-password")
-            for login, title, first_name in [("admin", "admin", "Админ"), ("member", "участник", "Участник")]:
+            for login, title, first_name in [("admin", "admin", "Админ"), ("member", "участник", "Участник"),
+                    ("head", "руководитель отдела", "Руководитель"), ("studentchair", "председатель студсовета", "Студсовет"),
+                    ("deputy", "заместитель председателя", "Заместитель")]:
                 position = models.Position(name=title, can_manage_positions=login == "admin",
-                                           can_register_users=login == "admin", can_edit_categories=login == "admin")
+                                           can_register_users=login == "admin", can_edit_categories=login == "admin",
+                                           can_edit_any_user=login == "admin", hierarchy_level=0 if login == "admin" else 6)
                 db.add(position)
                 db.flush()
                 db.add(models.User(login=login, first_name=first_name, last_name="Тестовый",

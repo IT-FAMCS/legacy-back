@@ -318,9 +318,24 @@ def can_manage_equipment(position: models.Position) -> bool:
     } or name.startswith("заместитель руководителя отдела ")
 
 
+def is_executive(position: models.Position) -> bool:
+    name = normalize_position_name(position)
+    return is_admin_chair_or_deputy(position) and "студсовета" not in name
+
+
+from member_warnings import create_warning_router
+
+app.include_router(create_warning_router(
+    get_current_user=get_current_user,
+    can_view=can_manage_equipment,
+    can_manage=is_executive,
+))
+
+
 app.include_router(create_equipment_router(
     get_current_user=get_current_user,
     can_manage=can_manage_equipment,
+    can_delete=is_executive,
 ))
 
 
@@ -562,6 +577,8 @@ def create_user_with_relations(
         group=user_data.group,
         position_id=position.id,
         telegram=user_data.telegram,
+        phone=user_data.phone,
+        education_format=user_data.education_format,
     )
 
     db.add(new_user)
@@ -748,7 +765,7 @@ async def update_user_data(
         
         update_data = user_update.dict(exclude_unset=True, exclude={"position", "department_ids"})
         for field, value in update_data.items():
-            if value is not None:
+            if value is not None or field in {"phone", "education_format"}:
                 setattr(target_user, field, value)
         
         # Update departments if provided

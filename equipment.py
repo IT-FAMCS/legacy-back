@@ -110,7 +110,7 @@ def record_history(db, item, actor, action):
     ))
 
 
-def create_equipment_router(*, get_current_user, can_manage):
+def create_equipment_router(*, get_current_user, can_manage, can_delete):
     router = APIRouter(prefix="/api/equipment", tags=["Equipment"])
 
     def manager(user=Depends(get_current_user)):
@@ -118,15 +118,21 @@ def create_equipment_router(*, get_current_user, can_manage):
             raise HTTPException(403, "Редактирование оборудования доступно только руководству")
         return user
 
-    def find_item(db, item_id):
+    def deleter(user=Depends(get_current_user)):
+        if not can_delete(user.position_ref):
+            raise HTTPException(403, "Удалять предметы могут только председатель, его заместители и админ")
+        return user
+
+    def find_item(db, item_id, include_deleted=False):
         item = db.get(models.EquipmentItem, item_id)
-        if item is None:
+        if item is None or (item.deleted_at is not None and not include_deleted):
             raise HTTPException(404, "Предмет не найден")
         return item
 
     def save_update(db, item, values, version, actor, action=None):
         result = db.execute(update(models.EquipmentItem).where(
             models.EquipmentItem.id == item.id, models.EquipmentItem.version == version,
+            models.EquipmentItem.deleted_at.is_(None),
         ).values(**values, version=version + 1).execution_options(synchronize_session=False))
         if result.rowcount != 1:
             db.rollback()
@@ -141,7 +147,7 @@ def create_equipment_router(*, get_current_user, can_manage):
 
     @router.get("")
     def list_items(_user=Depends(get_current_user), db: Session = Depends(get_db)):
-        items = db.query(models.EquipmentItem).options(
+        items = db.query(models.EquipmentItem).filter(models.EquipmentItem.deleted_at.is_(None)).options(
             joinedload(models.EquipmentItem.holder_user), joinedload(models.EquipmentItem.location),
         ).order_by(models.EquipmentItem.id).all()
         return [item_data(item) for item in items]
@@ -155,7 +161,7 @@ def create_equipment_router(*, get_current_user, can_manage):
         users = db.query(models.User).filter(
             models.User.is_active.is_(True), models.User.is_deactivated.is_(False),
         ).order_by(models.User.last_name, models.User.first_name, models.User.id).all()
-        return {"can_manage": can_manage(user.position_ref), "default_location_id": default_id,
+        return {"can_manage": can_manage(user.position_ref), "can_delete": can_delete(user.position_ref), "default_location_id": default_id,
                 "locations": [location_data(value) for value in locations],
                 "users": [user_data(value) for value in users]}
 
@@ -215,9 +221,14 @@ def create_equipment_router(*, get_current_user, can_manage):
         return save_update(db, item, {"holder_user_id": user.id, "location_id": None,
                                      "taken_at": now_utc()}, data.version, user, "taken")
 
+    @router.delete("/{item_id}")
+    def delete_item(item_id: int, data: TakeItem, actor=Depends(deleter), db: Session = Depends(get_db)):
+        item = find_item(db, item_id)
+        return save_update(db, item, {"deleted_at": now_utc()}, data.version, actor, "deleted")
+
     @router.get("/{item_id}/history")
     def history(item_id: int, _user=Depends(get_current_user), db: Session = Depends(get_db)):
-        find_item(db, item_id)
+        find_item(db, item_id, include_deleted=True)
         events = db.query(models.EquipmentHistory).filter_by(item_id=item_id).order_by(
             models.EquipmentHistory.id.desc()).all()
         return [{"id": event.id, "action": event.action, "actor_name": event.actor_name,

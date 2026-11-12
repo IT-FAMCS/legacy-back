@@ -188,3 +188,21 @@ class EquipmentTests(unittest.TestCase):
         self.db.commit()
         self.assertFalse(self.request("GET", "/options", role="секретарь")[1]["can_manage"])
         self.assertEqual(self.request("POST", body={"name": "Кабель"}, role="секретарь")[0], 403)
+
+    def test_only_executive_can_archive_items_and_history_survives(self):
+        item = self.create()
+        for role in ("участник", "секретарь", "руководитель отдела", "заместитель руководителя отдела", "председатель студсовета"):
+            self.assertEqual(self.request("DELETE", f"/{item['id']}", {"version": item["version"]}, role)[0], 403)
+        for role in ("admin", "админ", "председатель", "заместитель председателя по IT", "зам. председателя"):
+            current = self.create()
+            self.assertEqual(self.request("DELETE", f"/{current['id']}", {"version": current["version"]}, role)[0], 200)
+            self.assertNotIn(current["id"], [value["id"] for value in self.request("GET")[1]])
+            self.assertEqual(self.request("POST", f"/{current['id']}/take", {"version": current["version"]}, "участник")[0], 404)
+            history = self.request("GET", f"/{current['id']}/history", role="участник")[1]
+            self.assertEqual([event["action"] for event in history], ["deleted", "created"])
+
+    def test_archive_rejects_a_stale_version(self):
+        item = self.create()
+        self.request("POST", f"/{item['id']}/take", {"version": item["version"]}, "участник")
+        self.assertEqual(self.request("DELETE", f"/{item['id']}", {"version": item["version"]})[0], 409)
+        self.assertEqual(len(self.request("GET")[1]), 1)

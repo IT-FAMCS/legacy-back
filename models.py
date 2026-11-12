@@ -40,6 +40,8 @@ class User(Base):
     position_id = Column(Integer, ForeignKey("positions.id"), nullable=False)
     
     telegram = Column(String)
+    phone = Column(String(40))
+    education_format = Column(String(16))
     
     is_active = Column(Boolean, default=True)
     is_deactivated = Column(Boolean, default=False)
@@ -204,6 +206,7 @@ class EquipmentItem(Base):
     location_id = Column(Integer, ForeignKey("equipment_locations.id"))
     taken_at = Column(DateTime)
     version = Column(Integer, nullable=False, default=1)
+    deleted_at = Column(DateTime)
     holder_user = relationship("User")
     location = relationship("EquipmentLocation")
 
@@ -219,3 +222,17 @@ class EquipmentHistory(Base):
     holder_login = Column(String)
     taken_at = Column(DateTime)
     recorded_at = Column(DateTime, nullable=False)
+
+
+class MemberWarning(Base):
+    __tablename__ = "member_warnings"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    reason = Column(Text, nullable=False)
+    issued_at = Column(DateTime, nullable=False)
+    issued_by_login = Column(String, nullable=False)
+    issued_by_name = Column(String, nullable=False)
+    removed_at = Column(DateTime)
+    removed_by_login = Column(String)
+    removed_by_name = Column(String)
+    removal_reason = Column(Text)
