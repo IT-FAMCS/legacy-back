@@ -19,7 +19,7 @@ from jose import jwt
 from sqlalchemy import create_engine, inspect
 
 
-async def asgi_request(method, path, body=None, token=None):
+async def asgi_request(method, path, body=None, token=None, extra_headers=None):
     """Exercise the real ASGI app without an extra HTTP client dependency."""
     path, _, query_string = path.partition('?')
     messages = []
@@ -27,6 +27,7 @@ async def asgi_request(method, path, body=None, token=None):
     headers = [(b"content-type", b"application/json")]
     if token:
         headers.append((b"authorization", f"Bearer {token}".encode()))
+    headers.extend((key.lower().encode(), str(value).encode()) for key, value in (extra_headers or {}).items())
     scope = {
         "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
         "method": method, "scheme": "http", "path": path, "raw_path": path.encode(),
@@ -87,7 +88,7 @@ class TraineeAccessTests(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
-    def request(self, method, path, body=None, token=None):
+    def request(self, method, path, body=None, token=None, extra_headers=None):
         return asyncio.run(asgi_request(method, path, body, token))
 
     def rotate(self):

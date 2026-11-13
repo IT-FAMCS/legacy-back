@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, joinedload
 
 import models
 from database import get_db
+from telegram_auth import replay, remember, no_store
 
 
 def now_utc():
@@ -110,8 +111,8 @@ def record_history(db, item, actor, action):
     ))
 
 
-def create_equipment_router(*, get_current_user, can_manage, can_delete):
-    router = APIRouter(prefix="/api/equipment", tags=["Equipment"])
+def create_equipment_router(*, get_current_user, can_manage, can_delete, prefix="/api/equipment"):
+    router = APIRouter(prefix=prefix, tags=['Equipment'], dependencies=[Depends(no_store)] if prefix.startswith('/api/telegram/') else [])
 
     def manager(user=Depends(get_current_user)):
         if not can_manage(user.position_ref):
@@ -141,9 +142,10 @@ def create_equipment_router(*, get_current_user, can_manage, can_delete):
         db.refresh(item)
         if action:
             record_history(db, item, actor, action)
+        response = item_data(item)
+        remember(db, actor, response)
         db.commit()
-        db.refresh(item)
-        return item_data(item)
+        return response
 
     @router.get("")
     def list_items(_user=Depends(get_current_user), db: Session = Depends(get_db)):
@@ -167,18 +169,26 @@ def create_equipment_router(*, get_current_user, can_manage, can_delete):
 
     @router.post("/locations", status_code=201)
     def create_location(data: LocationCreate, _user=Depends(manager), db: Session = Depends(get_db)):
+        cached = replay(db, _user)
+        if cached is not None:
+            return cached
         location = models.EquipmentLocation(name=data.name, name_key=data.name.casefold())
         db.add(location)
         try:
+            db.flush()
+            response = location_data(location)
+            remember(db, _user, response)
             db.commit()
         except IntegrityError:
             db.rollback()
             raise HTTPException(409, "Такое место хранения уже существует") from None
-        db.refresh(location)
-        return location_data(location)
+        return response
 
     @router.post("", status_code=201)
     def create_item(data: ItemCreate, user=Depends(manager), db: Session = Depends(get_db)):
+        cached = replay(db, user)
+        if cached is not None:
+            return cached
         location_id = data.location_id
         if data.holder_user_id is None and location_id is None:
             location_id = default_location(db).id
@@ -190,12 +200,16 @@ def create_equipment_router(*, get_current_user, can_manage, can_delete):
         db.add(item)
         db.flush()
         record_history(db, item, user, "created")
+        response = item_data(item)
+        remember(db, user, response)
         db.commit()
-        db.refresh(item)
-        return item_data(item)
+        return response
 
     @router.patch("/{item_id}")
     def edit_item(item_id: int, data: ItemUpdate, user=Depends(manager), db: Session = Depends(get_db)):
+        cached = replay(db, user)
+        if cached is not None:
+            return cached
         item = find_item(db, item_id)
         incoming = data.model_dump(exclude_unset=True, exclude={"version"})
         values = {key: incoming[key] for key in ("name", "description") if key in incoming}
@@ -217,12 +231,18 @@ def create_equipment_router(*, get_current_user, can_manage, can_delete):
 
     @router.post("/{item_id}/take")
     def take_item(item_id: int, data: TakeItem, user=Depends(get_current_user), db: Session = Depends(get_db)):
+        cached = replay(db, user)
+        if cached is not None:
+            return cached
         item = find_item(db, item_id)
         return save_update(db, item, {"holder_user_id": user.id, "location_id": None,
                                      "taken_at": now_utc()}, data.version, user, "taken")
 
     @router.delete("/{item_id}")
     def delete_item(item_id: int, data: TakeItem, actor=Depends(deleter), db: Session = Depends(get_db)):
+        cached = replay(db, actor)
+        if cached is not None:
+            return cached
         item = find_item(db, item_id)
         return save_update(db, item, {"deleted_at": now_utc()}, data.version, actor, "deleted")
 

@@ -1,4 +1,4 @@
-﻿import os
+import os
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -1176,6 +1176,8 @@ async def delete_card(
 
     from tasks import assert_card_has_no_tasks
     assert_card_has_no_tasks(db, card.id)
+    from responsibility_zones import discard_empty_board
+    discard_empty_board(db, card.id)
     log_activity(db, current_user.id, "delete", "card", card.id, card.title)
     db.delete(card)
     db.commit()
@@ -1584,3 +1586,21 @@ async def root():
 # Register after authentication and card access helpers are defined.
 from tasks import create_tasks_router
 app.include_router(create_tasks_router(get_current_user=get_current_user, has_access_to_card=has_access_to_card))
+
+
+# Separate trusted-service actor, same domain policies as the member web API.
+from telegram_auth import bot_actor
+from telegram_links import create_telegram_router
+app.include_router(create_telegram_router(get_current_user=get_current_user))
+app.include_router(create_equipment_router(get_current_user=bot_actor, can_manage=can_manage_equipment,
+    can_delete=is_executive, prefix='/api/telegram/bot/equipment'))
+app.include_router(create_tasks_router(get_current_user=bot_actor, has_access_to_card=has_access_to_card,
+    prefix='/api/telegram/bot/tasks', bot_mode=True))
+
+from telegram_notifications import create_notification_router
+app.include_router(create_notification_router(has_access_to_card=has_access_to_card))
+
+from responsibility_zones import create_zone_router
+app.include_router(create_zone_router(get_current_user=get_current_user,has_access_to_card=has_access_to_card))
+app.include_router(create_zone_router(get_current_user=bot_actor,has_access_to_card=has_access_to_card,
+    prefix='/api/telegram/bot/events',bot_mode=True))
