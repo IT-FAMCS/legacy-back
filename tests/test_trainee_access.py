@@ -21,6 +21,7 @@ from sqlalchemy import create_engine, inspect
 
 async def asgi_request(method, path, body=None, token=None):
     """Exercise the real ASGI app without an extra HTTP client dependency."""
+    path, _, query_string = path.partition('?')
     messages = []
     payload = json.dumps(body).encode() if body is not None else b""
     headers = [(b"content-type", b"application/json")]
@@ -29,7 +30,7 @@ async def asgi_request(method, path, body=None, token=None):
     scope = {
         "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
         "method": method, "scheme": "http", "path": path, "raw_path": path.encode(),
-        "query_string": b"", "root_path": "", "headers": headers,
+        "query_string": query_string.encode(), "root_path": "", "headers": headers,
         "client": ("127.0.0.1", 12345), "server": ("testserver", 80),
     }
 

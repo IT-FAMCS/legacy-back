@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -958,10 +958,16 @@ async def update_category(
             detail="Недостаточно прав для редактирования категорий"
         )
     
+    from tasks import begin_task_write
+    begin_task_write(db)
     category = db.query(models.Category).filter(models.Category.id == category_id).first()
     if not category:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Категория не найдена")
     
+    if category_update.name is not None and category_update.name != category.name:
+        from tasks import assert_card_has_no_tasks
+        for linked_card in category.cards:
+            assert_card_has_no_tasks(db, linked_card.id)
     update_data = category_update.dict(exclude_unset=True)
     for field, value in update_data.items():
         setattr(category, field, value)
@@ -1125,11 +1131,16 @@ async def update_card(
             detail="Недостаточно прав для редактирования карточек"
         )
     
+    from tasks import begin_task_write
+    begin_task_write(db)
     card = db.query(models.Card).filter(models.Card.id == card_id).first()
     if not card:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Карточка не найдена")
 
     update_data = card_update.dict(exclude_unset=True)
+    if 'category_id' in update_data and update_data['category_id'] != card.category_id:
+        from tasks import assert_card_has_no_tasks
+        assert_card_has_no_tasks(db, card.id)
     details = describe_card_changes(card, update_data, db)
     for field, value in update_data.items():
         setattr(card, field, value)
@@ -1157,10 +1168,14 @@ async def delete_card(
             detail="Недостаточно прав для удаления карточек"
         )
 
+    from tasks import begin_task_write
+    begin_task_write(db)
     card = db.query(models.Card).filter(models.Card.id == card_id).first()
     if not card:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Карточка не найдена")
 
+    from tasks import assert_card_has_no_tasks
+    assert_card_has_no_tasks(db, card.id)
     log_activity(db, current_user.id, "delete", "card", card.id, card.title)
     db.delete(card)
     db.commit()
@@ -1565,3 +1580,7 @@ async def root():
         "version": "3.0.0",
         "docs": "/docs"
     }
+
+# Register after authentication and card access helpers are defined.
+from tasks import create_tasks_router
+app.include_router(create_tasks_router(get_current_user=get_current_user, has_access_to_card=has_access_to_card))

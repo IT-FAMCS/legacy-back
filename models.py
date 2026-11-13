@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, CheckConstraint
+﻿from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, CheckConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
@@ -236,3 +236,48 @@ class MemberWarning(Base):
     removed_by_login = Column(String)
     removed_by_name = Column(String)
     removal_reason = Column(Text)
+
+# Shared tasks: links reference existing cards, never the account Department directory.
+class Task(Base):
+    __tablename__ = "tasks"
+    id = Column(Integer, primary_key=True)
+    title = Column(String(300), nullable=False)
+    description = Column(Text, nullable=False, default="")
+    deadline = Column(String(10))
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    event_card_id = Column(Integer, ForeignKey("cards.id"), index=True)
+    completed = Column(Boolean, nullable=False, default=False)
+    archived = Column(Boolean, nullable=False, default=False, index=True)
+    version = Column(Integer, nullable=False, default=1)
+    __mapper_args__ = {"version_id_col": version}
+    event_card = relationship("Card", foreign_keys=[event_card_id])
+    department_links = relationship("TaskDepartment", cascade="all, delete-orphan", lazy="selectin")
+    assignee_links = relationship("TaskAssignee", cascade="all, delete-orphan", lazy="selectin")
+
+
+class TaskDepartment(Base):
+    __tablename__ = "task_departments"
+    task_id = Column(Integer, ForeignKey("tasks.id"), primary_key=True)
+    card_id = Column(Integer, ForeignKey("cards.id"), primary_key=True, index=True)
+    card = relationship("Card")
+
+
+class TaskAssignee(Base):
+    __tablename__ = "task_assignees"
+    task_id = Column(Integer, ForeignKey("tasks.id"), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True, index=True)
+    user = relationship("User")
+
+
+class TaskHistory(Base):
+    __tablename__ = "task_history"
+    id = Column(Integer, primary_key=True)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False, index=True)
+    actor_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    actor_name = Column(String, nullable=False)
+    action = Column(String, nullable=False)
+    before_json = Column(Text)
+    after_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
