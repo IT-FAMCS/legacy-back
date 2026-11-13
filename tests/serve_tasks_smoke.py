@@ -1,4 +1,4 @@
-﻿"""Temporary task demo fixture. Never reads or changes app.db."""
+"""Temporary task demo fixture. Never reads or changes app.db."""
 import os
 import sys
 import tempfile
@@ -26,7 +26,7 @@ if __name__ == '__main__':
                 db.add(category)
                 db.flush()
                 for title in titles:
-                    db.add(models.Card(title=title, content='Описание карточки для проверки задач.', category_id=category.id))
+                    db.add(models.Card(title=title, content='Описание карточки для проверки таск.', category_id=category.id))
             db.commit()
             endpoint = next(route.endpoint for route in main.app.routes if getattr(route, 'path', None) == '/api/tasks' and 'POST' in route.methods)
             member = db.query(models.User).filter_by(login='member').one()
@@ -35,7 +35,7 @@ if __name__ == '__main__':
                 dict(title='Собрать программу вечера', description='Добавить выступления и расписание репетиций.', event_card_id=3, department_card_ids=[2], assignee_ids=[2], deadline='2026-11-10'),
                 dict(title='Обновить список контактов', description='Проверить контакты партнёров отдела.', department_card_ids=[1], assignee_ids=[1]),
                 dict(title='Забронировать аудиторию', event_card_id=4, department_card_ids=[2], assignee_ids=[3], deadline='2026-11-26'),
-                dict(title='Подготовить отчёт за месяц', description='Общая задача организации.', assignee_ids=[1], completed=True),
+                dict(title='Подготовить отчёт за месяц', description='Общая таска организации.', assignee_ids=[1], completed=True),
             ]
             for sample in samples:
                 endpoint(data=TaskCreate(**sample), user=member, db=db)

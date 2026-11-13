@@ -1,4 +1,4 @@
-﻿"""Shared card tasks, optimistic edits, and durable history. No bot delivery here."""
+"""Shared card tasks, optimistic edits, and durable history. No bot delivery here."""
 import json
 from datetime import date, datetime, timezone
 from typing import Optional
@@ -46,7 +46,7 @@ class TaskCreate(BaseModel):
     def nonempty(cls, value):
         value = value.strip()
         if not value:
-            raise ValueError("Введите название задачи")
+            raise ValueError("Введите название таски")
         return value
 
     @field_validator("department_card_ids", "assignee_ids")
@@ -93,7 +93,7 @@ def assert_card_has_no_tasks(db, card_id):
         models.Task.department_links.any(models.TaskDepartment.card_id == card_id),
     )).first()
     if linked:
-        raise HTTPException(409, "Карточка связана с задачами. Сначала перенесите связи задач, включая архивные.")
+        raise HTTPException(409, "Карточка связана с тасками. Сначала перенесите связи тасок, включая архивные.")
 
 
 def create_tasks_router(*, get_current_user, has_access_to_card):
@@ -116,7 +116,7 @@ def create_tasks_router(*, get_current_user, has_access_to_card):
     def get_task(db, task_id, user):
         task = query(db).filter(models.Task.id == task_id).first()
         if task is None or not accessible(task, user):
-            raise HTTPException(404, "Задача не найдена или недоступна")
+            raise HTTPException(404, "Таска не найдена или недоступна")
         return task
 
     def card_data(card):
@@ -184,7 +184,7 @@ def create_tasks_router(*, get_current_user, has_access_to_card):
             db.commit()
         except StaleDataError:
             db.rollback()
-            raise HTTPException(409, "Задача уже изменена. Обновите данные и повторите действие.")
+            raise HTTPException(409, "Таска уже изменена. Обновите данные и повторите действие.")
 
     @router.get("/options")
     def options(user=Depends(get_current_user), db: Session = Depends(get_db)):
@@ -198,8 +198,13 @@ def create_tasks_router(*, get_current_user, has_access_to_card):
 
     @router.get("")
     def list_tasks(card_id: Optional[int] = None, archived: bool = False,
+                   assignee_id: Optional[int] = None, active_only: bool = False,
                    user=Depends(get_current_user), db: Session = Depends(get_db)):
         tasks = query(db).filter(models.Task.archived == archived)
+        if assignee_id is not None:
+            tasks = tasks.filter(models.Task.assignee_links.any(models.TaskAssignee.user_id == assignee_id))
+        if active_only:
+            tasks = tasks.filter(models.Task.completed.is_(False))
         if card_id is not None:
             if not card_visible(db.get(models.Card, card_id), user):
                 raise HTTPException(404, "Карточка не найдена или недоступна")
@@ -230,7 +235,7 @@ def create_tasks_router(*, get_current_user, has_access_to_card):
         begin_task_write(db)
         task = get_task(db, task_id, user)
         if task.archived or task.version != data.version:
-            raise HTTPException(409, "Задача изменена или удалена. Обновите данные.")
+            raise HTTPException(409, "Таска изменена или перенесена в архив. Обновите данные.")
         values = data.model_dump(exclude_unset=True, exclude={"version"})
         validate_links(db, values, user, task)
         before = serialize(task)
@@ -244,17 +249,17 @@ def create_tasks_router(*, get_current_user, has_access_to_card):
             commit(db)
         except StaleDataError:
             db.rollback()
-            raise HTTPException(409, "Задача уже изменена. Обновите данные.")
+            raise HTTPException(409, "Таска уже изменена. Обновите данные.")
         return serialize(task)
 
     @router.delete("/{task_id}")
     def archive_task(task_id: int, data: TaskVersion, user=Depends(get_current_user), db: Session = Depends(get_db)):
         if not can_delete_tasks(user.position_ref):
-            raise HTTPException(403, "Удалять задачи могут только председатель и заместители")
+            raise HTTPException(403, "Переносить таски в архив могут только председатель и заместители")
         begin_task_write(db)
         task = get_task(db, task_id, user)
         if task.archived or task.version != data.version:
-            raise HTTPException(409, "Задача изменена или уже удалена. Обновите данные.")
+            raise HTTPException(409, "Таска изменена или уже перенесена в архив. Обновите данные.")
         before = serialize(task)
         task.archived = True
         task.updated_at = now()
@@ -264,7 +269,7 @@ def create_tasks_router(*, get_current_user, has_access_to_card):
             commit(db)
         except StaleDataError:
             db.rollback()
-            raise HTTPException(409, "Задача уже изменена. Обновите данные.")
+            raise HTTPException(409, "Таска уже изменена. Обновите данные.")
         return serialize(task)
 
     def snapshot_visible(snapshot, user, db):

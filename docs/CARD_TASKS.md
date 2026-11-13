@@ -24,3 +24,5 @@ Browser integration uses a fresh isolated server on every run; no production/loc
 4. Stop the fixture after the run. Screenshots are written to `../.tools/browser/tasks-*.png`.
 
 The test covers shared task identity in both card tabs, general tasks, editing other users' tasks, complete/reopen, audit, conflict draft recovery, deputy-only archive, and real mobile page/editor width.
+
+Profile task lists use assignee_id and active_only query parameters, in addition to existing card access and archive filtering. The UI calls these records таски and labels archive actions explicitly.

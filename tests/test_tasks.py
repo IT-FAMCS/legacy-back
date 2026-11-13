@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import unittest
 from test_trainee_access import asgi_request
 import main
@@ -105,7 +105,7 @@ class TaskTests(unittest.TestCase):
                        {'department_card_ids': [self.cards['Правила']]},
                        {'department_card_ids': [999999]}, {'assignee_ids': [999999]},
                        {'deadline': 'bad'}, {'title': 'x' * 301}]:
-            status, _ = self.request('POST', body={'title': 'Задача', **values})
+            status, _ = self.request('POST', body={'title': 'Таска', **values})
             self.assertIn(status, [422, 404], values)
         task = self.create()
         for field in ['title', 'completed', 'department_card_ids', 'assignee_ids']:
@@ -195,3 +195,20 @@ class TaskTests(unittest.TestCase):
             results = list(executor.map(lambda text: self.request('PATCH', path, {'title': text, 'version': 1}), ['Первый', 'Второй']))
         self.assertEqual(sorted(status for status, _ in results), [200, 409])
         self.assertEqual(len(self.request('GET', path + '/history')[1]), 2)
+
+    def test_profile_tasks_filter_excludes_completed_archived_and_other_assignees(self):
+        uid = self.users['Участник']
+        active = self.create(assignee_ids=[uid])
+        self.create(assignee_ids=[uid], completed=True)
+        archived = self.create(assignee_ids=[uid])
+        self.request('DELETE', f"/api/tasks/{archived['id']}", {'version': 1}, role='Председатель')
+        self.create(assignee_ids=[self.users['Другой участник']])
+        status, rows = self.request('GET', f'/api/tasks?assignee_id={uid}&active_only=true')
+        self.assertEqual(status, 200)
+        self.assertEqual([row['id'] for row in rows], [active['id']])
+        self.create(assignee_ids=[uid], event_card_id=self.cards['Посвящение'])
+        self.db.get(models.Card, self.cards['Посвящение']).access_logins = 'nobody'
+        self.db.commit()
+        self.create(assignee_ids=[uid], department_card_ids=[self.cards['IT']])
+        status, rows = self.request('GET', f'/api/tasks?assignee_id={uid}&active_only=true')
+        self.assertEqual(len(rows), 2)
