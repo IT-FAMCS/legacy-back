@@ -1,4 +1,4 @@
-﻿from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, CheckConstraint
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, CheckConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
@@ -280,4 +280,107 @@ class TaskHistory(Base):
     action = Column(String, nullable=False)
     before_json = Column(Text)
     after_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+# Telegram identity is independent from editable contact fields.
+class TelegramBinding(Base):
+    __tablename__ = 'telegram_bindings'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), unique=True, nullable=False)
+    telegram_user_id = Column(Integer, unique=True, nullable=True)
+    chat_id = Column(Integer)
+    username = Column(String(64))
+    display_name = Column(String(200))
+    generation = Column(String(64), nullable=False)
+    active = Column(Boolean, nullable=False, default=True)
+    blocked = Column(Boolean, nullable=False, default=False)
+    linked_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    user = relationship('User')
+
+
+class TelegramLinkChallenge(Base):
+    __tablename__ = 'telegram_link_challenges'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    token_hash = Column(String(64), unique=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    consumed_at = Column(DateTime)
+    telegram_user_id = Column(Integer)
+    chat_id = Column(Integer)
+    username = Column(String(64))
+    display_name = Column(String(200))
+
+
+class TelegramRateLimit(Base):
+    __tablename__ = 'telegram_rate_limits'
+    key = Column(String(160), primary_key=True)
+    window = Column(DateTime, nullable=False)
+    count = Column(Integer, nullable=False)
+
+
+class TelegramRequestReceipt(Base):
+    __tablename__ = 'telegram_request_receipts'
+    key = Column(String(64), primary_key=True)
+    fingerprint = Column(String(64), nullable=False)
+    response_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class TelegramNotification(Base):
+    __tablename__ = 'telegram_notifications'
+    id = Column(Integer, primary_key=True)
+    event_key = Column(String(200), unique=True, nullable=False)
+    task_id = Column(Integer, ForeignKey('tasks.id'), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    binding_id = Column(Integer, ForeignKey('telegram_bindings.id'), nullable=False)
+    generation = Column(String(64), nullable=False)
+    kind = Column(String(20), nullable=False)
+    deadline = Column(String(10))
+    state = Column(String(20), nullable=False, default='pending', index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    next_attempt_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    lease_token = Column(String(64))
+    lease_until = Column(DateTime)
+    last_error = Column(String(40))
+
+class ResponsibilityBoard(Base):
+    __tablename__ = 'responsibility_boards'
+    card_id = Column(Integer, ForeignKey('cards.id'), primary_key=True)
+    version = Column(Integer, nullable=False, default=1)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    __mapper_args__ = {'version_id_col': version}
+
+
+class ResponsibilityZone(Base):
+    __tablename__ = 'responsibility_zones'
+    id = Column(Integer, primary_key=True)
+    card_id = Column(Integer, ForeignKey('cards.id'), nullable=False, index=True)
+    title = Column(String(200), nullable=False)
+    people_required = Column(Integer, nullable=False, default=1)
+    lead_user_id = Column(Integer, ForeignKey('users.id'))
+    version = Column(Integer, nullable=False, default=1)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    __mapper_args__ = {'version_id_col': version}
+    lead = relationship('User', foreign_keys=[lead_user_id])
+    helper_links = relationship('ResponsibilityHelper', cascade='all, delete-orphan', lazy='selectin')
+
+
+class ResponsibilityHelper(Base):
+    __tablename__ = 'responsibility_helpers'
+    zone_id = Column(Integer, ForeignKey('responsibility_zones.id'), primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), primary_key=True)
+    user = relationship('User')
+
+
+class ResponsibilityHistory(Base):
+    __tablename__ = 'responsibility_history'
+    id = Column(Integer, primary_key=True)
+    card_id = Column(Integer, nullable=False, index=True)
+    zone_id = Column(Integer, nullable=False)
+    actor_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    actor_name = Column(String, nullable=False)
+    action = Column(String, nullable=False)
+    before_json = Column(Text)
+    after_json = Column(Text)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
