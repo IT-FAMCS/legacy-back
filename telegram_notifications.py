@@ -178,8 +178,11 @@ class Batch(Input):
     limit: int = Field(default=20, ge=1, le=50)
 
 
-class Ack(Input):
+class Lease(Input):
     lease_token: str = Field(min_length=16, max_length=64)
+
+
+class Ack(Lease):
     outcome: Literal['delivered', 'retry', 'blocked', 'permanent']
     retry_after: Optional[int] = Field(default=None, ge=1, le=86400)
 
@@ -187,6 +190,53 @@ class Ack(Input):
 def create_notification_router(*, has_access_to_card):
     router = APIRouter(prefix='/api/telegram/service/notifications', tags=['Telegram notifications'],
                        dependencies=[Depends(service_access),Depends(no_store)])
+
+    def eligible_recipient(db, entry, binding, task):
+        return (binding is not None and binding.active and binding.generation == entry.generation
+                and binding.user_id == entry.user_id and binding.user.is_active and not binding.user.is_deactivated
+                and task is not None and not muted(db, entry.user_id, entry.task_id))
+
+    def delivery_text(db, entry, binding, task, clock):
+        user = binding.user
+        assigned = any(link.user_id == user.id for link in task.assignee_links)
+        participant = assigned or task.creator_id == user.id
+        can_view = visible(task, user, has_access_to_card)
+        title = task.title[:300]
+        if entry.kind == 'deadline':
+            local, hour = reminder_time(clock)
+            tomorrow = (local.date() + timedelta(days=1)).isoformat()
+            if (task.completed or task.archived or not participant or not can_view
+                    or task.deadline != entry.deadline or task.deadline != tomorrow or local.hour < hour):
+                return None
+            return f'Завтра дедлайн таски «{title}»: {task.deadline}.'
+
+        if entry.created_at < clock - timedelta(days=1):
+            return None
+        if entry.kind == 'updated':
+            if participant and can_view:
+                return update_message(db, entry, task, user, has_access_to_card)
+            return None
+
+        newer = db.query(models.TelegramNotification.id).filter(
+            models.TelegramNotification.task_id == entry.task_id,
+            models.TelegramNotification.user_id == entry.user_id,
+            models.TelegramNotification.kind.in_(['assigned', 'removed']),
+            models.TelegramNotification.id > entry.id).first()
+        if newer:
+            return None
+        if entry.kind == 'removed' and not assigned:
+            if can_view:
+                return removed_message(db, entry, user, has_access_to_card)
+            return 'Вас сняли с ответственности за таску.'
+        if entry.kind == 'assigned' and assigned and can_view and not task.archived:
+            from tasks import display_name
+            text = f'Вам назначена таска «{title}».\nСоздатель: {short_value(display_name(task.creator))}.'
+            if task.completed:
+                text += '\nСтатус: выполнена.'
+            if task.deadline:
+                text += f'\nДедлайн: {task.deadline}.'
+            return text
+        return None
 
     @router.post('/claim')
     def claim(data: Batch, db: Session = Depends(get_db)):
@@ -204,10 +254,8 @@ def create_notification_router(*, has_access_to_card):
                 break
             binding=db.get(models.TelegramBinding,entry.binding_id)
             task=db.get(models.Task,entry.task_id)
-            if (not binding or not binding.active or binding.generation!=entry.generation
-                    or binding.user_id != entry.user_id or not binding.user.is_active or binding.user.is_deactivated
-                    or task is None or muted(db, entry.user_id, entry.task_id)):
-                entry.state='cancelled'
+            if not eligible_recipient(db, entry, binding, task):
+                entry.state = 'cancelled'
                 continue
             if binding.blocked:
                 entry.state='pending'
@@ -216,45 +264,10 @@ def create_notification_router(*, has_access_to_card):
             if entry.attempts >= 8:
                 entry.state='dead'
                 continue
-            assigned=any(link.user_id==entry.user_id for link in task.assignee_links)
-            can_view=visible(task,binding.user,has_access_to_card)
-            if entry.kind=='deadline':
-                local,hour=reminder_time(clock)
-                valid=(not task.completed and not task.archived and (assigned or task.creator_id == entry.user_id) and can_view
-                       and task.deadline==entry.deadline
-                       and task.deadline==(local.date()+timedelta(days=1)).isoformat() and local.hour>=hour)
-            elif entry.kind == 'updated':
-                valid = (can_view and (assigned or task.creator_id == entry.user_id)
-                         and entry.created_at >= clock - timedelta(days=1))
-            else:
-                newer=db.query(models.TelegramNotification.id).filter(
-                    models.TelegramNotification.task_id==entry.task_id,
-                    models.TelegramNotification.user_id==entry.user_id,
-                    models.TelegramNotification.kind.in_(['assigned','removed']),
-                    models.TelegramNotification.id>entry.id).first()
-                valid=(newer is None and entry.created_at>=clock-timedelta(days=1)
-                       and ((entry.kind=='assigned' and assigned and can_view and not task.archived)
-                            or (entry.kind=='removed' and not assigned)))
-            if not valid:
-                entry.state='cancelled'
+            text = delivery_text(db, entry, binding, task, clock)
+            if text is None:
+                entry.state = 'cancelled'
                 continue
-            title=task.title[:300]
-            if entry.kind=='removed':
-                text = removed_message(db, entry, binding.user, has_access_to_card) if can_view else 'Вас сняли с ответственности за таску.'
-            elif entry.kind == 'updated':
-                text = update_message(db, entry, task, binding.user, has_access_to_card)
-                if not text:
-                    entry.state = 'cancelled'
-                    continue
-            elif entry.kind=='assigned':
-                from tasks import display_name
-                text = f'Вам назначена таска «{title}».\nСоздатель: {short_value(display_name(task.creator))}.'
-                if task.completed:
-                    text += '\nСтатус: выполнена.'
-                if task.deadline:
-                    text+=f'\nДедлайн: {task.deadline}.'
-            else:
-                text=f'Завтра дедлайн таски «{title}»: {task.deadline}.'
             entry.state='leased'
             entry.lease_token=secrets.token_hex(16)
             entry.lease_until=clock+timedelta(seconds=90)
@@ -264,6 +277,23 @@ def create_notification_router(*, has_access_to_card):
                            'kind':entry.kind,'text':text})
         db.commit()
         return result
+
+    @router.post('/{notification_id}/validate')
+    def validate(notification_id: int, data: Lease, db: Session = Depends(get_db)):
+        from tasks import begin_task_write
+        begin_task_write(db)
+        entry = db.get(models.TelegramNotification, notification_id)
+        clock = now()
+        if (entry is None or entry.state != 'leased' or not entry.lease_token
+                or not hmac.compare_digest(entry.lease_token.encode(), data.lease_token.encode())
+                or not entry.lease_until or entry.lease_until <= clock):
+            return {'valid': False}
+        binding = db.get(models.TelegramBinding, entry.binding_id)
+        task = db.get(models.Task, entry.task_id)
+        if not eligible_recipient(db, entry, binding, task) or binding.blocked:
+            return {'valid': False}
+        text = delivery_text(db, entry, binding, task, clock)
+        return {'valid': True, 'text': text} if text is not None else {'valid': False}
 
     @router.post('/{notification_id}/ack')
     def ack(notification_id: int, data: Ack, db: Session = Depends(get_db)):

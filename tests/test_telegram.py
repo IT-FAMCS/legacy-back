@@ -118,7 +118,6 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual(self.bot('PATCH',f"bot/tasks/{other['id']}",{'version':1,'completed':True},request_id='creator-only')[0],200)
         self.assertEqual(self.bot('PATCH',f"bot/tasks/{other['id']}",{'version':2,'completed':False},request_id='creator-reopen')[0],200)
         path=f"bot/tasks/{own['id']}"
-        self.assertEqual(self.bot('PATCH',path,{'version':1,'title':'Forbidden'},request_id='wrong')[0],403)
         self.assertEqual(self.bot('PATCH',path,{'version':1,'completed':True})[0],422)
         status,done=self.bot('PATCH',path,{'version':1,'completed':True},request_id='complete-1')
         self.assertEqual(status,200,done)
@@ -126,7 +125,59 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual(self.bot('PATCH',path,{'version':1,'completed':True},request_id='complete-1')[1],done)
         self.assertEqual(self.bot('GET','bot/tasks')[1],[])
         self.assertEqual(self.db.query(models.TaskHistory).filter_by(task_id=own['id']).count(),2)
-        self.assertEqual(self.bot('POST','bot/tasks',{'title':'not supported'},request_id='create')[0],405)
+        self.assertEqual(self.bot('DELETE',path,{'version':done['version']},request_id='delete')[0],405)
+
+    def test_bot_task_creation_and_shared_edits_with_receipts(self):
+        self.bind()
+        options = self.bot('GET', 'bot/tasks/options')
+        self.assertEqual(options, self.web('GET', '/api/tasks/options'))
+        uid = self.users['Другой участник']
+        data = {'title':'Первая', 'description':'Текст', 'event_card_id':self.cards['Посвящение'],
+                'department_card_ids':[self.cards['IT']], 'assignee_ids':[uid], 'deadline':'2030-01-01'}
+        self.assertEqual(self.bot('POST','bot/tasks',{**data,'creator_id':uid},request_id='spoof')[0],422)
+        status, task = self.bot('POST','bot/tasks',data,request_id='create')
+        self.assertEqual(status,201,task)
+        self.assertEqual(task['creator_id'],self.users['Участник'])
+        self.assertEqual(self.bot('POST','bot/tasks',data,request_id='create'), (201,task))
+        self.assertEqual(self.bot('POST','bot/tasks',{**data,'title':'Другая'},request_id='create')[0],409)
+        self.assertEqual(self.db.query(models.Task).count(),1)
+        self.assertEqual(self.db.query(models.TaskHistory).count(),1)
+
+        # Unassigned users have the same ordinary edit permissions as on the website.
+        self.bind(tid=202,role='Председатель')
+        self.assertEqual(self.bot('GET','bot/tasks',tid=202)[1],[])
+        status, rows = self.bot('GET','bot/tasks?scope=all',tid=202)
+        self.assertEqual(status,200)
+        self.assertEqual([row['id'] for row in rows],[task['id']])
+        path = f"bot/tasks/{task['id']}"
+        self.assertFalse(self.bot('GET',path,tid=202)[1]['can_change_status'])
+        edit = {'version':1,'title':'Исправленная','description':'Новый текст','event_card_id':None,
+                'department_card_ids':[], 'assignee_ids':[], 'deadline':None}
+        self.assertEqual(self.bot('PATCH',path,{**edit,'completed':True},tid=202,request_id='deny')[0],403)
+        status, result = self.bot('PATCH',path,edit,tid=202,request_id='edit')
+        self.assertEqual(status,200,result)
+        for field in set(edit) - {'version'}:
+            self.assertEqual(result[field],edit[field])
+        self.assertEqual(self.bot('PATCH',path,edit,tid=202,request_id='edit')[1],result)
+        self.assertEqual(self.bot('PATCH',path,edit,tid=202,request_id='stale')[0],409)
+        self.assertEqual(self.db.query(models.TaskHistory).count(),2)
+
+    def test_bot_task_scope_applies_card_permissions_to_lists_options_writes_and_replay(self):
+        self.bind()
+        cid = self.cards['Посвящение']
+        data = {'title':'Скрытая','event_card_id':cid}
+        status, task = self.bot('POST','bot/tasks',data,request_id='original')
+        self.assertEqual(status,201,task)
+        self.db.get(models.Card,cid).access_logins='nobody'
+        self.db.commit()
+        self.assertEqual(self.bot('GET','bot/tasks?scope=all')[1],[])
+        self.assertEqual(self.bot('GET','bot/tasks/options')[1]['events'],[])
+        path = f"bot/tasks/{task['id']}"
+        self.assertEqual(self.bot('GET',path)[0],404)
+        self.assertEqual(self.bot('PATCH',path,{'version':1,'event_card_id':None},request_id='edit')[0],404)
+        self.assertEqual(self.bot('POST','bot/tasks',data,request_id='original')[0],404)
+        self.assertEqual(self.bot('POST','bot/tasks',data,request_id='new')[0],404)
+        self.assertEqual(self.db.query(models.Task).count(),1)
 
     def test_equipment_roles_and_atomic_replay_of_create_take_location(self):
         self.bind()

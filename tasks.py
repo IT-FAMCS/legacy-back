@@ -1,7 +1,7 @@
 """Shared card tasks, optimistic edits, and durable history. No bot delivery here."""
 import json
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -124,8 +124,6 @@ def create_tasks_router(*, get_current_user, has_access_to_card, can_delete_task
         task = query(db).filter(models.Task.id == task_id).first()
         if task is None or not accessible(task, user):
             raise HTTPException(404, "Таска не найдена или недоступна")
-        if bot_mode and not participant(task, user):
-            raise HTTPException(404, "Таска не назначена вам или недоступна")
         return task
 
     def card_data(card):
@@ -258,14 +256,14 @@ def create_tasks_router(*, get_current_user, has_access_to_card, can_delete_task
     @router.get("")
     def list_tasks(card_id: Optional[int] = None, archived: bool = False,
                    assignee_id: Optional[int] = None, active_only: bool = False, include_created: bool = False,
-                   include_completed: bool = False,
+                   include_completed: bool = False, scope: Literal["mine", "all"] = "mine",
                    user=Depends(get_current_user), db: Session = Depends(get_db)):
-        if bot_mode:
+        if bot_mode and scope == "mine":
             assignee_id, active_only, archived = user.id, not include_completed, False
         tasks = query(db).filter(models.Task.archived == archived)
         if assignee_id is not None:
             assigned = models.Task.assignee_links.any(models.TaskAssignee.user_id == assignee_id)
-            tasks = tasks.filter(or_(assigned, models.Task.creator_id == user.id) if bot_mode and include_created else assigned)
+            tasks = tasks.filter(or_(assigned, models.Task.creator_id == user.id) if bot_mode and scope == "mine" and include_created else assigned)
         if active_only:
             tasks = tasks.filter(models.Task.completed.is_(False))
         if card_id is not None:
@@ -279,6 +277,10 @@ def create_tasks_router(*, get_current_user, has_access_to_card, can_delete_task
     @router.post("", status_code=201)
     def create_task(data: TaskCreate, user=Depends(get_current_user), db: Session = Depends(get_db)):
         begin_task_write(db)
+        cached = replay(db, user)
+        if cached is not None:
+            get_task(db, cached["id"], user)
+            return accessible_receipt(cached, user, db)
         values = data.model_dump()
         validate_links(db, values, user)
         task = models.Task(creator_id=user.id, created_at=now(), updated_at=now(), archived=False)
@@ -291,8 +293,10 @@ def create_tasks_router(*, get_current_user, has_access_to_card, can_delete_task
         apply(task, values, db)
         db.flush()
         history(db, task, user, "create", None)
+        result = task_response(task, user)
+        remember(db, user, result)
         commit(db)
-        return task_response(task, user)
+        return result
 
     @router.get("/{task_id}")
     def read_task(task_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
@@ -302,11 +306,9 @@ def create_tasks_router(*, get_current_user, has_access_to_card, can_delete_task
     def update_task(task_id: int, data: TaskPatch, user=Depends(get_current_user), db: Session = Depends(get_db)):
         begin_task_write(db)
         task = get_task(db, task_id, user)
-        if bot_mode and data.model_fields_set != {'version', 'completed'}:
-            raise HTTPException(403, "В боте можно менять только статус своих тасок")
         cached = replay(db, user)
         if cached is not None:
-            return cached
+            return accessible_receipt(cached, user, db)
         if task.archived or task.version != data.version:
             raise HTTPException(409, "Таска изменена или перенесена в архив. Обновите данные.")
         values = data.model_dump(exclude_unset=True, exclude={"version"})
@@ -381,6 +383,12 @@ def create_tasks_router(*, get_current_user, has_access_to_card, can_delete_task
             ids.append(snapshot["event_card_id"])
         return all(card_visible(db.get(models.Card, cid), user) for cid in ids)
 
+    def accessible_receipt(cached, user, db):
+        # A replay can contain historical cards that have since become restricted.
+        if not snapshot_visible(cached, user, db):
+            raise HTTPException(404, "Таска не найдена или недоступна")
+        return cached
+
     @router.get("/{task_id}/history")
     def read_history(task_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
         get_task(db, task_id, user)
@@ -397,7 +405,8 @@ def create_tasks_router(*, get_current_user, has_access_to_card, can_delete_task
         return result
 
     if bot_mode:
-        allowed = {(prefix, 'GET'), (prefix + '/{task_id}', 'GET'), (prefix + '/{task_id}', 'PATCH')}
+        allowed = {(prefix, 'GET'), (prefix, 'POST'), (prefix + '/options', 'GET'),
+                   (prefix + '/{task_id}', 'GET'), (prefix + '/{task_id}', 'PATCH')}
         for suffix in ('/preferences/notifications', '/{task_id}/preferences/notifications'):
             allowed.update((prefix + suffix, method) for method in ('GET', 'PUT'))
         router.routes = [route for route in router.routes if any((route.path, method) in allowed for method in route.methods)]

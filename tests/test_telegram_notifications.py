@@ -194,3 +194,50 @@ class NotificationTests(unittest.TestCase):
         entries = self.claim()
         self.assertEqual([(r['kind'], r['chat_id']) for r in entries], [('assigned', 303)])
         self.assertIn('выполнена', entries[0]['text'])
+
+    def validate(self, entry):
+        status, result = self.bot('POST', f"service/notifications/{entry['id']}/validate",
+                                  {'lease_token': entry['lease_token']})
+        self.assertEqual(status, 200, result)
+        return result
+
+    def test_validate_rechecks_removed_title_and_assignment_after_claim(self):
+        self.bind()
+        uid = self.users['Участник']
+        card = self.db.get(models.Card, self.cards['Посвящение'])
+        task = self.create_task(assignee_ids=[uid], event_card_id=card.id)
+        path = f"/api/tasks/{task['id']}"
+        assigned, = self.claim()
+        self.assertEqual(self.validate(assigned), {'valid':True, 'text':assigned['text']})
+        self.edit(path, {'version': 1, 'assignee_ids': []})
+        self.assertEqual(self.validate(assigned), {'valid':False})
+        removed, = self.claim()
+        self.assertIn(task['title'], removed['text'])
+        card.access_logins = 'nobody'
+        self.db.commit()
+        checked = self.validate(removed)
+        self.assertTrue(checked['valid'])
+        self.assertNotIn(task['title'], checked['text'])
+        row = self.db.get(models.TelegramNotification, removed['id'])
+        self.assertEqual((row.attempts, row.lease_token), (1, removed['lease_token']))
+        card.access_logins = None
+        self.db.commit()
+        self.edit(path, {'version': 2, 'assignee_ids': [uid]})
+        self.assertEqual(self.validate(removed), {'valid':False})
+
+    def test_validate_redacts_historical_card_removed_from_current_task(self):
+        self.bind()
+        card = self.db.get(models.Card, self.cards['Посвящение'])
+        task = self.create_task(assignee_ids=[self.users['Участник']], event_card_id=card.id)
+        self.ack(self.claim()[0])
+        self.edit(f"/api/tasks/{task['id']}", {'version': 1, 'event_card_id': None})
+        entry, = self.claim()
+        self.assertIn('Посвящение', entry['text'])
+        card.access_logins = 'nobody'
+        self.db.commit()
+        checked = self.validate(entry)
+        self.assertTrue(checked['valid'])
+        self.assertNotIn('Посвящение', checked['text'])
+        self.assertEqual(self.validate({**entry, 'lease_token': 'invalid-token-' * 2}), {'valid':False})
+        with patch('telegram_notifications.now',return_value=datetime.utcnow()+timedelta(minutes=3)):
+            self.assertEqual(self.validate(entry), {'valid':False})
