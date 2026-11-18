@@ -13,7 +13,13 @@ class NotificationTests(unittest.TestCase):
     bot=identity.TelegramTests.bot
     issue=identity.TelegramTests.issue
     bind=identity.TelegramTests.bind
-    create_task=identity.TelegramTests.create_task
+    def create_task(self, **values):
+        status, task = self.web('POST', '/api/tasks', {'title': 'Тестовая таска', **values}, role='Другой участник')
+        self.assertEqual(status, 201, task)
+        return task
+
+    def edit(self, path, data):
+        return self.web('PATCH', path, data, role='Другой участник')
 
     def claim(self, at=None):
         if at is None:
@@ -38,9 +44,14 @@ class NotificationTests(unittest.TestCase):
         self.assertIn('назначена',deliveries[0]['text'])
         self.assertEqual(self.ack(deliveries[0])[0],200)
         self.assertEqual(self.ack(deliveries[0])[0],200)
-        self.web('PATCH',f"/api/tasks/{task['id']}",{'version':1,'description':'Detail only'})
-        self.assertEqual(self.claim(),[])
-        status,changed=self.web('PATCH',f"/api/tasks/{task['id']}",{'version':2,'assignee_ids':[]})
+        self.edit(f"/api/tasks/{task['id']}",{'version':1,'description':'Detail only'})
+        updates = self.claim()
+        self.assertEqual([e['kind'] for e in updates], ['updated'])
+        self.assertIn('Detail only', updates[0]['text'])
+        self.ack(updates[0])
+        self.edit(f"/api/tasks/{task['id']}", {'version': 2, 'description': 'Detail only'})
+        self.assertEqual(self.claim(), [])
+        status,changed=self.edit(f"/api/tasks/{task['id']}",{'version':2,'assignee_ids':[]})
         self.assertEqual(status,200)
         removed=self.claim()
         self.assertEqual([x['kind'] for x in removed],['removed'])
@@ -62,9 +73,9 @@ class NotificationTests(unittest.TestCase):
         self.assertIn('Завтра',entries[0]['text'])
         self.ack(entries[0])
         self.assertEqual(self.claim(datetime(2030,6,10,12,0)),[])
-        self.web('PATCH',f"/api/tasks/{task['id']}",{'version':1,'deadline':'2030-06-12'})
+        self.edit(f"/api/tasks/{task['id']}",{'version':1,'deadline':'2030-06-12'})
         self.assertEqual(len(self.claim(datetime(2030,6,11,7,0))),1)
-        self.web('PATCH',f"/api/tasks/{task['id']}",{'version':2,'completed':True})
+        self.edit(f"/api/tasks/{task['id']}",{'version':2,'completed':True})
         self.assertEqual(self.claim(datetime(2030,6,11,8,0)),[])
 
     def test_expired_lease_is_reclaimed_old_ack_rejected_and_retry_is_delayed(self):
@@ -95,7 +106,7 @@ class NotificationTests(unittest.TestCase):
     def test_superseded_assignment_and_restricted_removal_do_not_leak_details(self):
         self.bind()
         task=self.create_task(assignee_ids=[self.users['Участник']],event_card_id=self.cards['Посвящение'])
-        self.web('PATCH',f"/api/tasks/{task['id']}",{'version':1,'assignee_ids':[]})
+        self.edit(f"/api/tasks/{task['id']}",{'version':1,'assignee_ids':[]})
         self.db.get(models.Card,self.cards['Посвящение']).access_logins='nobody'
         self.db.commit()
         entries=self.claim()
@@ -114,3 +125,72 @@ class NotificationTests(unittest.TestCase):
         self.bot('GET','bot/me?contact=true')
         self.db.expire_all()
         self.assertFalse(self.db.get(models.TelegramBinding,binding.id).blocked)
+
+    def test_creator_gets_external_edit_and_actor_does_not(self):
+        self.bind()
+        self.bind(tid=102, role='Другой участник')
+        task = self.create_task(assignee_ids=[self.users['Участник'], self.users['Другой участник']])
+        self.assertEqual([r['telegram_user_id'] for r in self.claim()], [101])
+        self.web('PATCH', f"/api/tasks/{task['id']}", {'version': 1, 'title': 'Новое название', 'completed': True})
+        rows = self.claim()
+        self.assertEqual([(r['telegram_user_id'], r['kind']) for r in rows], [(102, 'updated')])
+        self.assertIn('Новое название', rows[0]['text'])
+        self.assertIn('Статус', rows[0]['text'])
+
+    def test_mute_at_claim_and_enqueue_including_deadline(self):
+        self.bind()
+        uid = self.users['Участник']
+        task = self.create_task(assignee_ids=[uid], deadline='2030-06-11')
+        mute = models.TaskNotificationMute(user_id=uid, scope=task['id'])
+        self.db.add(mute)
+        self.db.commit()
+        self.assertEqual(self.claim(), [])
+        self.edit(f"/api/tasks/{task['id']}", {'version': 1, 'description': 'Hidden'})
+        self.assertEqual(self.claim(datetime(2030,6,10,7)), [])
+        self.assertEqual(self.db.query(models.TelegramNotification).count(), 1)
+        self.db.delete(mute)
+        self.db.add(models.TaskNotificationMute(user_id=uid, scope=0))
+        self.db.commit()
+        self.create_task(assignee_ids=[uid])
+        self.assertEqual(self.db.query(models.TelegramNotification).count(), 1)
+
+    def test_creator_deadline_is_deduplicated_and_delivered_without_assignment(self):
+        self.bind(tid=102, role='Другой участник')
+        self.bind()
+        creator = self.users['Другой участник']
+        first = self.create_task(assignee_ids=[creator], deadline='2030-06-11')
+        second = self.create_task(assignee_ids=[self.users['Участник']], deadline='2030-06-11')
+        deadlines = self.claim(datetime(2030, 6, 10, 7))
+        self.assertCountEqual([(r['task_id'], r['telegram_user_id']) for r in deadlines],
+                              [(first['id'], 102), (second['id'], 102), (second['id'], 101)])
+
+    def test_sequential_edits_keep_event_values_and_recheck_old_card_acl(self):
+        self.bind()
+        task = self.create_task(assignee_ids=[self.users['Участник']], event_card_id=self.cards['Посвящение'])
+        self.ack(self.claim()[0])
+        path = f"/api/tasks/{task['id']}"
+        self.edit(path, {'version': 1, 'title': 'Version two'})
+        self.edit(path, {'version': 2, 'title': 'Version three'})
+        first, second = self.claim()
+        self.assertIn('Version two', first['text'])
+        self.assertNotIn('Version three', first['text'])
+        self.assertIn('Version three', second['text'])
+        self.ack(first)
+        self.ack(second)
+        self.edit(path, {'version': 3, 'event_card_id': None})
+        self.db.get(models.Card,self.cards['Посвящение']).access_logins = 'nobody'
+        self.db.commit()
+        change, = self.claim()
+        self.assertNotIn('Посвящение', change['text'])
+
+    def test_assignment_on_completed_edit_reaches_confirmed_account(self):
+        self.bind(tid=303)
+        self.db.get(models.User, self.users['Участник']).telegram = '@another_account'
+        self.db.commit()
+        task = self.create_task()
+        path = f"/api/tasks/{task['id']}"
+        response = self.edit(path, {'version': 1, 'assignee_ids': [self.users['Участник']], 'completed': True})
+        self.assertEqual(response[0], 200)
+        entries = self.claim()
+        self.assertEqual([(r['kind'], r['chat_id']) for r in entries], [('assigned', 303)])
+        self.assertIn('выполнена', entries[0]['text'])

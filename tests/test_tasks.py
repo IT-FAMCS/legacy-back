@@ -51,10 +51,10 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(status, 201, data)
         return data
 
-    def test_shared_record_edits_completion_and_history_by_any_member(self):
+    def test_assignee_completes_and_creator_reopens(self):
         task = self.create(event_card_id=self.cards['Посвящение'],
                            department_card_ids=[self.cards['IT'], self.cards['Культура']],
-                           assignee_ids=[self.users['Участник']], deadline='2026-12-01')
+                           assignee_ids=[self.users['Другой участник']], deadline='2026-12-01')
         self.assertTrue(task['created_at'])
         status, tasks = self.request('GET')
         self.assertEqual(status, 200)
@@ -75,12 +75,25 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(reopened['completed'])
 
-    def test_archive_only_chair_and_deputies_preserves_history(self):
+    def test_only_current_assignee_or_creator_can_change_status(self):
+        task = self.create()
+        path = f"/api/tasks/{task['id']}"
+        self.assertTrue(task['can_change_status'])
+        for role in ['Другой участник', 'admin', 'Председатель', 'Заместитель председателя по IT']:
+            self.assertFalse(self.request('GET', path, role=role)[1]['can_change_status'])
+            status, _ = self.request('PATCH', path, {'version': 1, 'completed': True,
+                                     'assignee_ids': [self.users[role]]}, role=role)
+            self.assertEqual(status, 403, role)
+        self.assertEqual(self.request('PATCH', path, {'version': 1, 'completed': False,
+                                     'description': 'Дополнение'}, role='admin')[0], 200)
+        self.assertFalse(self.request('GET', path)[1]['completed'])
+
+    def test_executives_archive_and_permanently_delete(self):
         for role in self.tokens:
             task = self.create()
             status, result = self.request('DELETE', f"/api/tasks/{task['id']}",
                                          {'version': task['version']}, role=role)
-            allowed = role in ['Председатель', 'Заместитель председателя по IT']
+            allowed = role in ['admin', 'Председатель', 'Заместитель председателя по IT']
             self.assertEqual(status, 200 if allowed else 403, (role, result))
             if allowed:
                 self.assertTrue(result['archived'])
@@ -92,6 +105,28 @@ class TaskTests(unittest.TestCase):
                 status, _ = self.request('PATCH', f"/api/tasks/{task['id']}",
                                          {'title': 'Нельзя', 'version': result['version']})
                 self.assertEqual(status, 409)
+
+                path = f"/api/tasks/{task['id']}/permanent"
+                self.assertEqual(self.request('DELETE', path, {'version': result['version']})[0], 403)
+                self.assertEqual(self.request('DELETE', path, {'version': task['version']}, role=role)[0], 409)
+                self.assertEqual(self.request('DELETE', path, {'version': result['version']}, role=role)[0], 200)
+                self.assertEqual(self.request('GET', f"/api/tasks/{task['id']}")[0], 404)
+                self.assertGreater(self.create()['id'], task['id'])
+            else:
+                path = f"/api/tasks/{task['id']}/permanent"
+                self.assertEqual(self.request('DELETE', path, {'version': task['version']}, role='admin')[0], 409)
+
+    def test_creator_and_personal_notification_preferences(self):
+        task = self.create()
+        self.assertEqual(task['creator_name'], 'Участник Имя')
+        global_path = '/api/tasks/preferences/notifications'
+        task_path = f"/api/tasks/{task['id']}/preferences/notifications"
+        for path in [task_path, global_path]:
+            self.assertEqual(self.request('GET', path), (200, {'enabled': True}))
+            self.assertEqual(self.request('PUT', path, {'enabled': False}), (200, {'enabled': False}))
+            self.assertEqual(self.request('GET', path, role='admin'), (200, {'enabled': True}))
+        self.assertEqual(self.request('PUT', global_path, {'enabled': True}), (200, {'enabled': True}))
+        self.assertEqual(self.request('GET', task_path), (200, {'enabled': False}))
 
     def test_version_conflicts_do_not_overwrite_or_add_history(self):
         task = self.create()

@@ -113,7 +113,10 @@ class TelegramTests(unittest.TestCase):
         status, rows=self.bot('GET','bot/tasks')
         self.assertEqual(status,200)
         self.assertEqual([r['id'] for r in rows],[own['id']])
-        self.assertEqual(self.bot('GET',f"bot/tasks/{other['id']}")[0],404)
+        self.assertEqual(self.bot('GET',f"bot/tasks/{other['id']}")[0],200)
+        self.assertEqual({row['id'] for row in self.bot('GET','bot/tasks?include_created=true')[1]}, {own['id'],other['id']})
+        self.assertEqual(self.bot('PATCH',f"bot/tasks/{other['id']}",{'version':1,'completed':True},request_id='creator-only')[0],200)
+        self.assertEqual(self.bot('PATCH',f"bot/tasks/{other['id']}",{'version':2,'completed':False},request_id='creator-reopen')[0],200)
         path=f"bot/tasks/{own['id']}"
         self.assertEqual(self.bot('PATCH',path,{'version':1,'title':'Forbidden'},request_id='wrong')[0],403)
         self.assertEqual(self.bot('PATCH',path,{'version':1,'completed':True})[0],422)

@@ -252,9 +252,23 @@ class Task(Base):
     archived = Column(Boolean, nullable=False, default=False, index=True)
     version = Column(Integer, nullable=False, default=1)
     __mapper_args__ = {"version_id_col": version}
+    creator = relationship("User", foreign_keys=[creator_id])
     event_card = relationship("Card", foreign_keys=[event_card_id])
     department_links = relationship("TaskDepartment", cascade="all, delete-orphan", lazy="selectin")
     assignee_links = relationship("TaskAssignee", cascade="all, delete-orphan", lazy="selectin")
+
+
+class TaskIdSequence(Base):
+    __tablename__ = 'task_id_sequence'
+    id = Column(Integer, primary_key=True)
+    last_deleted_id = Column(Integer, nullable=False)
+
+
+class TaskNotificationMute(Base):
+    __tablename__ = 'task_notification_mutes'
+    user_id = Column(Integer, ForeignKey('users.id'), primary_key=True)
+    # Zero mutes all tasks for this user. Positive scopes identify individual tasks.
+    scope = Column(Integer, primary_key=True)
 
 
 class TaskDepartment(Base):

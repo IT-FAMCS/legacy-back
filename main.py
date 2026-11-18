@@ -1585,7 +1585,7 @@ async def root():
 
 # Register after authentication and card access helpers are defined.
 from tasks import create_tasks_router
-app.include_router(create_tasks_router(get_current_user=get_current_user, has_access_to_card=has_access_to_card))
+app.include_router(create_tasks_router(can_delete_tasks=is_admin_chair_or_deputy, get_current_user=get_current_user, has_access_to_card=has_access_to_card))
 
 
 # Separate trusted-service actor, same domain policies as the member web API.
@@ -1594,7 +1594,7 @@ from telegram_links import create_telegram_router
 app.include_router(create_telegram_router(get_current_user=get_current_user))
 app.include_router(create_equipment_router(get_current_user=bot_actor, can_manage=can_manage_equipment,
     can_delete=is_executive, prefix='/api/telegram/bot/equipment'))
-app.include_router(create_tasks_router(get_current_user=bot_actor, has_access_to_card=has_access_to_card,
+app.include_router(create_tasks_router(can_delete_tasks=is_admin_chair_or_deputy, get_current_user=bot_actor, has_access_to_card=has_access_to_card,
     prefix='/api/telegram/bot/tasks', bot_mode=True))
 
 from telegram_notifications import create_notification_router

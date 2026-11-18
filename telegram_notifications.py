@@ -1,5 +1,6 @@
 """Atomic task event outbox, calendar reminders, leased delivery and retry."""
 import hmac
+import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -10,7 +11,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
-from sqlalchemy.dialects.sqlite import insert
 import models
 from database import get_db
 from telegram_auth import service_access, no_store
@@ -20,18 +20,109 @@ def now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def enqueue_assignment_changes(db, task, before):
-    """Never commit here: task mutation, audit and notifications are one transaction."""
+def muted(db, user_id, task_id):
+    return db.query(models.TaskNotificationMute.user_id).filter(
+        models.TaskNotificationMute.user_id == user_id,
+        models.TaskNotificationMute.scope.in_([0, task_id]),
+    ).first() is not None
+
+
+def enqueue_assignment_changes(db, task, before, after, actor, check_card, record):
+    """Store one event per recipient in the task transaction."""
     previous = set(before['assignee_ids']) if before else set()
-    current = {link.user_id for link in task.assignee_links}
-    for kind, recipients in [('assigned', current-previous), ('removed', previous-current)]:
-        for uid in recipients:
-            binding = db.query(models.TelegramBinding).filter_by(user_id=uid, active=True).first()
-            if not binding or not binding.user.is_active or binding.user.is_deactivated:
-                continue
-            db.add(models.TelegramNotification(event_key=f'{kind}:{task.id}:{task.version}:{uid}',
-                task_id=task.id, user_id=uid, binding_id=binding.id, generation=binding.generation,
-                kind=kind, state='pending', created_at=now(), next_attempt_at=now(), attempts=0))
+    current = set(after['assignee_ids'])
+    added, removed = current - previous, previous - current
+    # A membership change supersedes pending alerts even when the actor is the
+    # recipient or their binding/settings prevent a replacement notification.
+    for users, kinds in [(removed, ['assigned']), (removed - {task.creator_id}, ['updated', 'deadline']),
+                         (added, ['removed'])]:
+        if users:
+            db.query(models.TelegramNotification).filter(
+                models.TelegramNotification.task_id == task.id,
+                models.TelegramNotification.user_id.in_(users),
+                models.TelegramNotification.kind.in_(kinds),
+                models.TelegramNotification.state.in_(['pending', 'leased']),
+            ).update({'state': 'cancelled'}, synchronize_session=False)
+    recipients = current | removed | {task.creator_id}
+    recipients.discard(actor.id)
+    if not recipients:
+        return
+    bindings = db.query(models.TelegramBinding).filter(
+        models.TelegramBinding.active.is_(True), models.TelegramBinding.user_id.in_(recipients),
+    ).all()
+    clock = now()
+    for binding in bindings:
+        uid = binding.user_id
+        user = binding.user
+        if not user.is_active or user.is_deactivated or muted(db, uid, task.id):
+            continue
+        kind = 'assigned' if uid in added else 'removed' if uid in removed else 'updated'
+        if kind != 'removed' and not visible(task, user, check_card):
+            continue
+        if record.id is None:
+            db.flush()
+        db.add(models.TelegramNotification(event_key=f'history:{record.id}:{kind}:{uid}',
+            task_id=task.id, user_id=uid, binding_id=binding.id, generation=binding.generation,
+            kind=kind, state='pending', created_at=clock, next_attempt_at=clock, attempts=0))
+
+
+def snapshot_visible(db, snapshot, user, check_card):
+    ids = list(snapshot.get('department_card_ids', []))
+    if snapshot.get('event_card_id'):
+        ids.append(snapshot['event_card_id'])
+    for cid in ids:
+        card = db.get(models.Card, cid)
+        if card is None or not check_card(user, card):
+            return False
+    return True
+
+
+def short_value(value, limit=100):
+    text = ' '.join(str(value).split())
+    return text if len(text) <= limit else text[:limit - 1] + '…'
+
+
+def field_value(snapshot, field):
+    if field in ('assignee_ids', 'department_card_ids'):
+        items, label = ('assignees', 'name') if field == 'assignee_ids' else ('departments', 'title')
+        value = ', '.join(row[label] for row in snapshot[items])
+    elif field == 'event_card_id':
+        value = (snapshot.get('event') or {}).get('title')
+    elif field == 'completed':
+        value = 'выполнена' if snapshot[field] else 'в работе'
+    elif field == 'archived':
+        value = 'в архиве' if snapshot[field] else 'активна'
+    else:
+        value = snapshot.get(field)
+    return short_value(value or '—')
+
+
+def removed_message(db, entry, user, check_card):
+    if entry.event_key.startswith('history:'):
+        record = db.get(models.TaskHistory, int(entry.event_key.split(':')[1]))
+        if record and record.task_id == entry.task_id and record.before_json:
+            before = json.loads(record.before_json)
+            if snapshot_visible(db, before, user, check_card):
+                return f'Вас сняли с ответственности за таску «{short_value(before["title"])}».'
+    return 'Вас сняли с ответственности за таску.'
+
+
+def update_message(db, entry, task, user, check_card):
+    record = db.get(models.TaskHistory, int(entry.event_key.split(':')[1]))
+    if record is None or record.task_id != task.id:
+        return None
+    before = json.loads(record.before_json) if record.before_json else {}
+    after = json.loads(record.after_json)
+    if not all(snapshot_visible(db, snapshot, user, check_card) for snapshot in (before, after)):
+        return f'Изменена таска «{short_value(task.title)}».'
+    lines = [f'{short_value(record.actor_name)} изменил(а) таску «{short_value(after["title"])}».']
+    fields = [('title', 'Название'), ('description', 'Описание'), ('deadline', 'Дедлайн'),
+              ('assignee_ids', 'Ответственные'), ('event_card_id', 'Мероприятие'),
+              ('department_card_ids', 'Отделы'), ('completed', 'Статус'), ('archived', 'Архив')]
+    for field, label in fields:
+        if before.get(field) != after.get(field):
+            lines.append(f'{label}: {field_value(before, field)} → {field_value(after, field)}')
+    return '\n'.join(lines)
 
 
 def visible(task, user, check_card):
@@ -65,14 +156,15 @@ def schedule_reminders(db, clock, check_card):
     deadline = (local.date() + timedelta(days=1)).isoformat()
     tasks = db.query(models.Task).filter_by(deadline=deadline, completed=False, archived=False).all()
     for task in tasks:
-        for link in task.assignee_links:
-            binding = db.query(models.TelegramBinding).filter_by(user_id=link.user_id, active=True, blocked=False).first()
-            if not binding or not visible(task, binding.user, check_card):
+        recipients = {task.creator_id} | {link.user_id for link in task.assignee_links}
+        for uid in sorted(recipients):
+            binding = db.query(models.TelegramBinding).filter_by(user_id=uid, active=True, blocked=False).first()
+            if not binding or muted(db, uid, task.id) or not visible(task, binding.user, check_card):
                 continue
-            key = f'deadline:{task.id}:{link.user_id}:{deadline}'
+            key = f'deadline:{task.id}:{uid}:{deadline}'
             if db.query(models.TelegramNotification.id).filter_by(event_key=key).first():
                 continue
-            db.add(models.TelegramNotification(event_key=key, task_id=task.id, user_id=link.user_id,
+            db.add(models.TelegramNotification(event_key=key, task_id=task.id, user_id=uid,
                 binding_id=binding.id, generation=binding.generation, kind='deadline', deadline=deadline,
                 state='pending', created_at=clock, next_attempt_at=clock, attempts=0))
     db.flush()
@@ -113,7 +205,8 @@ def create_notification_router(*, has_access_to_card):
             binding=db.get(models.TelegramBinding,entry.binding_id)
             task=db.get(models.Task,entry.task_id)
             if (not binding or not binding.active or binding.generation!=entry.generation
-                    or not binding.user.is_active or binding.user.is_deactivated or task is None):
+                    or binding.user_id != entry.user_id or not binding.user.is_active or binding.user.is_deactivated
+                    or task is None or muted(db, entry.user_id, entry.task_id)):
                 entry.state='cancelled'
                 continue
             if binding.blocked:
@@ -127,9 +220,12 @@ def create_notification_router(*, has_access_to_card):
             can_view=visible(task,binding.user,has_access_to_card)
             if entry.kind=='deadline':
                 local,hour=reminder_time(clock)
-                valid=(not task.completed and not task.archived and assigned and can_view
+                valid=(not task.completed and not task.archived and (assigned or task.creator_id == entry.user_id) and can_view
                        and task.deadline==entry.deadline
                        and task.deadline==(local.date()+timedelta(days=1)).isoformat() and local.hour>=hour)
+            elif entry.kind == 'updated':
+                valid = (can_view and (assigned or task.creator_id == entry.user_id)
+                         and entry.created_at >= clock - timedelta(days=1))
             else:
                 newer=db.query(models.TelegramNotification.id).filter(
                     models.TelegramNotification.task_id==entry.task_id,
@@ -137,16 +233,24 @@ def create_notification_router(*, has_access_to_card):
                     models.TelegramNotification.kind.in_(['assigned','removed']),
                     models.TelegramNotification.id>entry.id).first()
                 valid=(newer is None and entry.created_at>=clock-timedelta(days=1)
-                       and ((entry.kind=='assigned' and assigned and can_view and not task.completed and not task.archived)
+                       and ((entry.kind=='assigned' and assigned and can_view and not task.archived)
                             or (entry.kind=='removed' and not assigned)))
             if not valid:
                 entry.state='cancelled'
                 continue
             title=task.title[:300]
             if entry.kind=='removed':
-                text=f'Вас сняли с ответственности за таску «{title}».' if can_view else 'Вас сняли с ответственности за таску. Подробности недоступны по текущим правам.'
+                text = removed_message(db, entry, binding.user, has_access_to_card) if can_view else 'Вас сняли с ответственности за таску.'
+            elif entry.kind == 'updated':
+                text = update_message(db, entry, task, binding.user, has_access_to_card)
+                if not text:
+                    entry.state = 'cancelled'
+                    continue
             elif entry.kind=='assigned':
-                text=f'Вам назначена таска «{title}».'
+                from tasks import display_name
+                text = f'Вам назначена таска «{title}».\nСоздатель: {short_value(display_name(task.creator))}.'
+                if task.completed:
+                    text += '\nСтатус: выполнена.'
                 if task.deadline:
                     text+=f'\nДедлайн: {task.deadline}.'
             else:

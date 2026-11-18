@@ -5,7 +5,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -23,13 +23,6 @@ def now():
 
 def display_name(user):
     return " ".join(filter(None, [user.last_name, user.first_name, user.middle_name])) or user.login
-
-
-def can_delete_tasks(position):
-    name = (position.name or "").strip().lower()
-    return (name in {"председатель", "председатель студсовета"}
-            or name.startswith("заместитель председателя")
-            or name.startswith("зам. председателя"))
 
 
 class TaskCreate(BaseModel):
@@ -74,6 +67,11 @@ class TaskPatch(TaskCreate):
         return value
 
 
+class TaskPreference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool
+
+
 class TaskVersion(BaseModel):
     model_config = ConfigDict(extra="forbid")
     version: int = Field(gt=0)
@@ -101,7 +99,7 @@ def assert_card_has_no_tasks(db, card_id):
         raise HTTPException(409, "Карточка связана с тасками. Сначала перенесите связи тасок, включая архивные.")
 
 
-def create_tasks_router(*, get_current_user, has_access_to_card, prefix="/api/tasks", bot_mode=False):
+def create_tasks_router(*, get_current_user, has_access_to_card, can_delete_tasks, prefix="/api/tasks", bot_mode=False):
     router = APIRouter(prefix=prefix, tags=["Tasks"], dependencies=[Depends(no_store)] if bot_mode else [])
 
     def card_visible(card, user):
@@ -114,15 +112,19 @@ def create_tasks_router(*, get_current_user, has_access_to_card, prefix="/api/ta
     def query(db):
         return db.query(models.Task).options(
             selectinload(models.Task.event_card),
+            selectinload(models.Task.creator),
             selectinload(models.Task.department_links).selectinload(models.TaskDepartment.card),
             selectinload(models.Task.assignee_links).selectinload(models.TaskAssignee.user),
         )
+
+    def participant(task, user):
+        return task.creator_id == user.id or any(link.user_id == user.id for link in task.assignee_links)
 
     def get_task(db, task_id, user):
         task = query(db).filter(models.Task.id == task_id).first()
         if task is None or not accessible(task, user):
             raise HTTPException(404, "Таска не найдена или недоступна")
-        if bot_mode and (task.archived or not any(link.user_id == user.id for link in task.assignee_links)):
+        if bot_mode and not participant(task, user):
             raise HTTPException(404, "Таска не назначена вам или недоступна")
         return task
 
@@ -138,11 +140,15 @@ def create_tasks_router(*, get_current_user, has_access_to_card, prefix="/api/ta
         return {"id": task.id, "title": task.title, "description": task.description,
                 "deadline": task.deadline, "created_at": task.created_at.isoformat() + "Z",
                 "updated_at": task.updated_at.isoformat() + "Z", "creator_id": task.creator_id,
+                "creator_name": display_name(task.creator),
                 "event_card_id": task.event_card_id,
                 "event": card_data(task.event_card) if task.event_card else None,
                 "departments": departments, "department_card_ids": [x['id'] for x in departments],
                 "assignees": assignees, "assignee_ids": [x['id'] for x in assignees],
                 "completed": task.completed, "archived": task.archived, "version": task.version}
+
+    def task_response(task, user):
+        return {**serialize(task), "can_change_status": not task.archived and participant(task, user)}
 
     def validate_links(db, data, user, task=None):
         if data.get("event_card_id") is not None:
@@ -182,11 +188,13 @@ def create_tasks_router(*, get_current_user, has_access_to_card, prefix="/api/ta
                 setattr(task, key, value)
 
     def history(db, task, actor, action, before):
-        db.add(models.TaskHistory(task_id=task.id, actor_id=actor.id, actor_name=display_name(actor),
+        after = serialize(task)
+        record = models.TaskHistory(task_id=task.id, actor_id=actor.id, actor_name=display_name(actor),
             action=action, before_json=json.dumps(before, ensure_ascii=False) if before else None,
-            after_json=json.dumps(serialize(task), ensure_ascii=False), created_at=now()))
+            after_json=json.dumps(after, ensure_ascii=False), created_at=now())
+        db.add(record)
         from telegram_notifications import enqueue_assignment_changes
-        enqueue_assignment_changes(db, task, before)
+        enqueue_assignment_changes(db, task, before, after, actor, has_access_to_card, record)
 
     def commit(db):
         try:
@@ -194,6 +202,48 @@ def create_tasks_router(*, get_current_user, has_access_to_card, prefix="/api/ta
         except StaleDataError:
             db.rollback()
             raise HTTPException(409, "Таска уже изменена. Обновите данные и повторите действие.")
+
+    def preference(scope, user, db):
+        return {"enabled": db.get(models.TaskNotificationMute, (user.id, scope)) is None}
+
+    def set_preference(scope, data, user, db):
+        cached = replay(db, user)
+        if cached is not None:
+            return cached
+        mute = db.get(models.TaskNotificationMute, (user.id, scope))
+        if data.enabled and mute is not None:
+            db.delete(mute)
+        elif not data.enabled:
+            if mute is None:
+                db.add(models.TaskNotificationMute(user_id=user.id, scope=scope))
+            pending = db.query(models.TelegramNotification).filter_by(user_id=user.id, state="pending")
+            if scope:
+                pending = pending.filter_by(task_id=scope)
+            pending.update({"state": "cancelled"}, synchronize_session=False)
+        result = {"enabled": data.enabled}
+        remember(db, user, result)
+        commit(db)
+        return result
+
+    @router.get("/preferences/notifications")
+    def read_global_preference(user=Depends(get_current_user), db: Session = Depends(get_db)):
+        return preference(0, user, db)
+
+    @router.put("/preferences/notifications")
+    def write_global_preference(data: TaskPreference, user=Depends(get_current_user), db: Session = Depends(get_db)):
+        begin_task_write(db)
+        return set_preference(0, data, user, db)
+
+    @router.get("/{task_id}/preferences/notifications")
+    def read_task_preference(task_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
+        get_task(db, task_id, user)
+        return preference(task_id, user, db)
+
+    @router.put("/{task_id}/preferences/notifications")
+    def write_task_preference(task_id: int, data: TaskPreference, user=Depends(get_current_user), db: Session = Depends(get_db)):
+        begin_task_write(db)
+        get_task(db, task_id, user)
+        return set_preference(task_id, data, user, db)
 
     @router.get("/options")
     def options(user=Depends(get_current_user), db: Session = Depends(get_db)):
@@ -207,13 +257,15 @@ def create_tasks_router(*, get_current_user, has_access_to_card, prefix="/api/ta
 
     @router.get("")
     def list_tasks(card_id: Optional[int] = None, archived: bool = False,
-                   assignee_id: Optional[int] = None, active_only: bool = False,
+                   assignee_id: Optional[int] = None, active_only: bool = False, include_created: bool = False,
+                   include_completed: bool = False,
                    user=Depends(get_current_user), db: Session = Depends(get_db)):
         if bot_mode:
-            assignee_id, active_only, archived = user.id, True, False
+            assignee_id, active_only, archived = user.id, not include_completed, False
         tasks = query(db).filter(models.Task.archived == archived)
         if assignee_id is not None:
-            tasks = tasks.filter(models.Task.assignee_links.any(models.TaskAssignee.user_id == assignee_id))
+            assigned = models.Task.assignee_links.any(models.TaskAssignee.user_id == assignee_id)
+            tasks = tasks.filter(or_(assigned, models.Task.creator_id == user.id) if bot_mode and include_created else assigned)
         if active_only:
             tasks = tasks.filter(models.Task.completed.is_(False))
         if card_id is not None:
@@ -221,7 +273,7 @@ def create_tasks_router(*, get_current_user, has_access_to_card, prefix="/api/ta
                 raise HTTPException(404, "Карточка не найдена или недоступна")
             tasks = tasks.filter(or_(models.Task.event_card_id == card_id,
                                      models.Task.department_links.any(models.TaskDepartment.card_id == card_id)))
-        return [serialize(t) for t in tasks.order_by(models.Task.created_at.desc(), models.Task.id.desc()).all()
+        return [task_response(t, user) for t in tasks.order_by(models.Task.created_at.desc(), models.Task.id.desc()).all()
                 if accessible(t, user)]
 
     @router.post("", status_code=201)
@@ -230,54 +282,60 @@ def create_tasks_router(*, get_current_user, has_access_to_card, prefix="/api/ta
         values = data.model_dump()
         validate_links(db, values, user)
         task = models.Task(creator_id=user.id, created_at=now(), updated_at=now(), archived=False)
+        if db.bind.dialect.name == "sqlite":
+            sequence = db.get(models.TaskIdSequence, 1)
+            if sequence is not None:
+                current_max = db.query(func.max(models.Task.id)).scalar() or 0
+                task.id = max(sequence.last_deleted_id, current_max) + 1
         db.add(task)
         apply(task, values, db)
         db.flush()
         history(db, task, user, "create", None)
         commit(db)
-        return serialize(task)
+        return task_response(task, user)
 
     @router.get("/{task_id}")
     def read_task(task_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
-        return serialize(get_task(db, task_id, user))
+        return task_response(get_task(db, task_id, user), user)
 
     @router.patch("/{task_id}")
     def update_task(task_id: int, data: TaskPatch, user=Depends(get_current_user), db: Session = Depends(get_db)):
         begin_task_write(db)
         task = get_task(db, task_id, user)
-        if bot_mode and (set(data.model_fields_set) - {'version', 'completed'} or data.completed is not True):
-            raise HTTPException(403, 'В боте можно только завершать свои таски')
+        if bot_mode and data.model_fields_set != {'version', 'completed'}:
+            raise HTTPException(403, "В боте можно менять только статус своих тасок")
         cached = replay(db, user)
         if cached is not None:
             return cached
-        if bot_mode and task.completed and data.completed is True:
-            result = serialize(task)
-            remember(db, user, result)
-            commit(db)
-            return result
         if task.archived or task.version != data.version:
             raise HTTPException(409, "Таска изменена или перенесена в архив. Обновите данные.")
         values = data.model_dump(exclude_unset=True, exclude={"version"})
+        if "completed" in values and values["completed"] != task.completed and not participant(task, user):
+            raise HTTPException(403, "Менять статус могут только создатель и ответственные")
         validate_links(db, values, user, task)
         before = serialize(task)
         apply(task, values, db)
         if serialize(task) == before:
-            return before
+            result = task_response(task, user)
+            if bot_mode:
+                remember(db, user, result)
+                commit(db)
+            return result
         task.updated_at = now()
         try:
             db.flush()
             history(db, task, user, "update", before)
-            remember(db, user, serialize(task))
+            remember(db, user, task_response(task, user))
             commit(db)
         except StaleDataError:
             db.rollback()
             raise HTTPException(409, "Таска уже изменена. Обновите данные.")
-        return serialize(task)
+        return task_response(task, user)
 
     @router.delete("/{task_id}")
     def archive_task(task_id: int, data: TaskVersion, user=Depends(get_current_user), db: Session = Depends(get_db)):
         if not can_delete_tasks(user.position_ref):
-            raise HTTPException(403, "Переносить таски в архив могут только председатель и заместители")
+            raise HTTPException(403, "Переносить таски в архив могут только админ, председатель и его заместители")
         begin_task_write(db)
         task = get_task(db, task_id, user)
         if task.archived or task.version != data.version:
@@ -292,7 +350,28 @@ def create_tasks_router(*, get_current_user, has_access_to_card, prefix="/api/ta
         except StaleDataError:
             db.rollback()
             raise HTTPException(409, "Таска уже изменена. Обновите данные.")
-        return serialize(task)
+        return task_response(task, user)
+
+    @router.delete("/{task_id}/permanent")
+    def delete_archived(task_id: int, data: TaskVersion, user=Depends(get_current_user), db: Session = Depends(get_db)):
+        if not can_delete_tasks(user.position_ref):
+            raise HTTPException(403, "Удалять таски могут только админ, председатель и его заместители")
+        begin_task_write(db)
+        task = get_task(db, task_id, user)
+        if not task.archived or task.version != data.version:
+            raise HTTPException(409, "Для удаления выберите актуальную версию архивированной таски")
+        if db.bind.dialect.name == "sqlite":
+            sequence = db.get(models.TaskIdSequence, 1)
+            if sequence is None:
+                db.add(models.TaskIdSequence(id=1, last_deleted_id=task.id))
+            else:
+                sequence.last_deleted_id = max(sequence.last_deleted_id, task.id)
+        db.query(models.TaskHistory).filter_by(task_id=task.id).delete()
+        db.query(models.TelegramNotification).filter_by(task_id=task.id).delete()
+        db.query(models.TaskNotificationMute).filter_by(scope=task.id).delete()
+        db.delete(task)
+        commit(db)
+        return {"id": task_id}
 
     def snapshot_visible(snapshot, user, db):
         if not snapshot:
@@ -319,5 +398,7 @@ def create_tasks_router(*, get_current_user, has_access_to_card, prefix="/api/ta
 
     if bot_mode:
         allowed = {(prefix, 'GET'), (prefix + '/{task_id}', 'GET'), (prefix + '/{task_id}', 'PATCH')}
+        for suffix in ('/preferences/notifications', '/{task_id}/preferences/notifications'):
+            allowed.update((prefix + suffix, method) for method in ('GET', 'PUT'))
         router.routes = [route for route in router.routes if any((route.path, method) in allowed for method in route.methods)]
     return router
