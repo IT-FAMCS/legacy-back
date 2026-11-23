@@ -214,7 +214,7 @@ class BudgetTests(unittest.TestCase):
         entry=self.req('GET')[1]['years'][0]['months'][0]['entries'][0]
         self.assertEqual(self.req('DELETE',f"/entries/{entry['id']}",{'expected_updated_at':entry['updated_at']},role='member')[0],403)
         self.assertEqual(self.req('DELETE',f"/entries/{entry['id']}",{'expected_updated_at':entry['updated_at']},role='cashier')[0],200)
-        self.assertEqual(self.req('GET')[1],{'balances':{'cash':'0.00','card':'0.00'},'years':[]})
+        self.assertEqual(self.req('GET')[1],{'can_import':True,'balances':{'cash':'0.00','card':'0.00'},'years':[]})
         self.assertEqual(self.req('DELETE',f"/entries/{entry['id']}",{'expected_updated_at':entry['updated_at']})[0],200)
         self.assertEqual(self.req('PATCH',f"/entries/{entry['id']}",{'amount':'25'})[0],404)
         self.db.expire_all();stored=self.db.get(models.BudgetEntry,entry['id'])
@@ -272,3 +272,14 @@ class BudgetTests(unittest.TestCase):
             code,result=self.req('GET');self.assertEqual(code,200,result)
             self.assertLess(len(queries),10,len(queries))
         finally:event.remove(database.engine,'before_cursor_execute',collect)
+
+    def test_monthly_income_expense_net_and_admin_import_capability(self):
+        for direction,amount in [('income','100.10'),('income','0.20'),('expense','12.34')]:
+            code,row=self.req('POST','/entries',{'direction':direction,'account':'cash','amount':amount,'description':'Totals','operation_at':'2026-11-01T00:00:00+03:00'})
+            self.assertEqual(code,201,row)
+        data=self.req('GET')[1];month=data['years'][0]['months'][0]
+        self.assertEqual((month['income_total'],month['expense_total'],month['net_total']),('100.30','12.34','87.96'))
+        self.assertTrue(data['can_import']);self.assertFalse(self.req('GET',role='cashier')[1]['can_import'])
+        self.req('DELETE',f"/entries/{row['id']}",{'expected_updated_at':row['updated_at']})
+        month=self.req('GET')[1]['years'][0]['months'][0]
+        self.assertEqual(month['expense_total'],'0.00');self.assertEqual(month['net_total'],'100.30')

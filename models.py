@@ -432,6 +432,8 @@ class BudgetEntry(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
     creator = relationship('User', foreign_keys=[created_by])
     editor = relationship('User', foreign_keys=[updated_by])
+    treasurer_id = Column(Integer, ForeignKey('users.id'), nullable=True)
+    treasurer = relationship('User', foreign_keys=[treasurer_id])
     request = relationship('BudgetRequest')
 
 
@@ -481,4 +483,32 @@ class ResponsibilityHistory(Base):
     action = Column(String, nullable=False)
     before_json = Column(Text)
     after_json = Column(Text)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class BudgetImportBatch(Base):
+    __tablename__ = 'budget_import_batches'
+    id = Column(String(64), primary_key=True)
+    created_by = Column(Integer, ForeignKey('users.id'), nullable=False)
+    payload = Column(Text, nullable=False)
+    result = Column(Text)
+    expires_at = Column(DateTime, nullable=False)
+
+
+class BudgetImportSource(Base):
+    __tablename__ = 'budget_import_sources'
+    source_key = Column(String(64), primary_key=True)
+    fingerprint = Column(String(64), nullable=False)
+    entry_id = Column(Integer, ForeignKey('budget_entries.id'), nullable=False)
+
+
+class BudgetCustodyAdjustment(Base):
+    __tablename__ = 'budget_custody_adjustments'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    account = Column(String(12), nullable=False)
+    amount = Column(Numeric(12, 2), nullable=False)
+    balance_before = Column(Numeric(12, 2), nullable=False)
+    balance_after = Column(Numeric(12, 2), nullable=False)
+    created_by = Column(Integer, ForeignKey('users.id'), nullable=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

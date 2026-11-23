@@ -46,6 +46,7 @@ class Amount(Input):
 
 
 class EntryCreate(Amount):
+    treasurer_id: Optional[int] = Field(default=None, gt=0)
     direction: Literal['income', 'expense']
     account: Literal['cash', 'card']
     description: str = Field(min_length=1, max_length=2000)
@@ -53,6 +54,7 @@ class EntryCreate(Amount):
 
 
 class EntryUpdate(Input):
+    treasurer_id: Optional[int] = Field(default=None, gt=0)
     direction: Optional[Literal['income', 'expense']] = None
     account: Optional[Literal['cash', 'card']] = None
     amount: Optional[Decimal] = None
@@ -62,7 +64,7 @@ class EntryUpdate(Input):
     @model_validator(mode='after')
     def validate_fields(self):
         values = self.model_dump(exclude_unset=True)
-        if not values or any(value is None for value in values.values()):
+        if not values or any(value is None for key,value in values.items() if key != 'treasurer_id'):
             raise ValueError('Передайте непустые поля операции')
         return self
 
@@ -141,11 +143,17 @@ def entry_data(row):
     result = {key: money(getattr(row, key)) if key == 'amount' else getattr(row, key)
               for key in ('id', 'direction', 'account', 'amount', 'description', 'operation_at',
                           'request_id', 'created_by', 'updated_by', 'created_at', 'updated_at')}
-    result.update(created_by_name=person_name(row.creator), created_by_login=row.creator.login if row.creator else None,
+    result.update(treasurer_id=row.treasurer_id, treasurer_name=person_name(row.treasurer), treasurer_login=row.treasurer.login if row.treasurer else None, created_by_name=person_name(row.creator), created_by_login=row.creator.login if row.creator else None,
                   updated_by_name=person_name(row.editor), updated_by_login=row.editor.login if row.editor else None,
                   applicant_name=row.request.applicant_name if row.request else None,
                   applicant_login=row.request.applicant.login if row.request and row.request.applicant else None)
     return result
+
+
+def monthly_totals(entries):
+    income = sum((Decimal(row['amount']) for row in entries if row['direction'] == 'income'), Decimal(0))
+    expense = sum((Decimal(row['amount']) for row in entries if row['direction'] == 'expense'), Decimal(0))
+    return dict(income_total=money(income), expense_total=money(expense), net_total=money(income-expense))
 
 
 def active(binding):
@@ -186,24 +194,32 @@ def create_budget_router(*, get_current_user, is_executive):
             raise HTTPException(404, 'Запись не найдена')
         return row
 
+    from budget_import import install_import_routes
+    from budget_custody import install_custody_routes
+    install_import_routes(router, get_current_user)
+    install_custody_routes(router, manager, is_executive)
+
     @router.get('/api/budget')
     def ledger(user=Depends(manager), db: Session=Depends(get_db)):
         balances = dict(cash=Decimal(0), card=Decimal(0))
         groups = {}
         for row in db.query(models.BudgetEntry).options(
-            joinedload(models.BudgetEntry.creator), joinedload(models.BudgetEntry.editor),
+            joinedload(models.BudgetEntry.treasurer), joinedload(models.BudgetEntry.creator), joinedload(models.BudgetEntry.editor),
             joinedload(models.BudgetEntry.request).joinedload(models.BudgetRequest.applicant)
         ).filter(models.BudgetEntry.deleted_at.is_(None)).order_by(models.BudgetEntry.operation_at.desc(), models.BudgetEntry.id.desc()).all():
             balances[row.account] += row.amount if row.direction == 'income' else -row.amount
             local = row.operation_at + timedelta(hours=3)
             groups.setdefault(local.year, {}).setdefault(local.month, []).append(entry_data(row))
-        return dict(balances={k: money(v) for k, v in balances.items()}, years=[
-            dict(year=year, months=[dict(month=month, entries=entries) for month, entries in months.items()])
+        return dict(can_import=user.position_ref.name.strip().lower() in ('admin', 'админ'), balances={k: money(v) for k, v in balances.items()}, years=[
+            dict(year=year, months=[dict(month=month, entries=entries, **monthly_totals(entries)) for month, entries in months.items()])
             for year, months in groups.items()])
 
     @router.post('/api/budget/entries', status_code=201)
     def create_entry(data: EntryCreate, user=Depends(manager), db: Session=Depends(get_db)):
         values = data.model_dump()
+        from budget_custody import validate_treasurer
+        values['treasurer_id'] = data.treasurer_id if 'treasurer_id' in data.model_fields_set else user.id
+        validate_treasurer(db, values['treasurer_id'], user.id)
         stamp = values['operation_at']
         values['operation_at'] = stamp.astimezone(timezone.utc).replace(tzinfo=None) if stamp.tzinfo else stamp
         row = models.BudgetEntry(**values, created_by=user.id, updated_by=user.id)
@@ -215,6 +231,9 @@ def create_budget_router(*, get_current_user, is_executive):
         begin_task_write(db)
         row = find(db, models.BudgetEntry, rid)
         if row.deleted_at is not None: raise HTTPException(404, 'Операция удалена')
+        from budget_custody import validate_treasurer
+        if 'treasurer_id' in data.model_fields_set:
+            validate_treasurer(db, data.treasurer_id, row.treasurer_id)
         for key, value in data.model_dump(exclude_unset=True).items():
             if key == 'operation_at' and value.tzinfo:
                 value = value.astimezone(timezone.utc).replace(tzinfo=None)
@@ -308,7 +327,7 @@ def create_budget_router(*, get_current_user, is_executive):
         if data.decision == 'approved':
             db.add(models.BudgetEntry(direction='expense' if row.request_type == 'reimbursement' else 'income',
                 account=data.account, amount=row.amount, description=row.description, operation_at=now(),
-                created_by=user.id, updated_by=user.id, request_id=row.id))
+                created_by=user.id, updated_by=user.id, treasurer_id=user.id, request_id=row.id))
         # Include prior recipients even if cashier permission changed: old buttons must disappear.
         recipient_ids = {n.binding_id for n in db.query(models.BudgetNotification).filter_by(request_id=rid).all()}
         queue(db, row, 'processed', [b for bid in recipient_ids if (b := db.get(models.TelegramBinding, bid)) is not None])

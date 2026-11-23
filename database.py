@@ -136,3 +136,14 @@ def ensure_schema_upgrades() -> None:
                 except OperationalError as exc:
                     if "duplicate column name" not in str(exc).lower():
                         raise
+
+    with engine.begin() as conn:
+        conn.exec_driver_sql("BEGIN IMMEDIATE")
+        columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(budget_entries)").fetchall()}
+        if columns and 'treasurer_id' not in columns:
+            try:
+                conn.exec_driver_sql('ALTER TABLE budget_entries ADD COLUMN treasurer_id INTEGER REFERENCES users(id)')
+                if 'created_by' in columns:
+                    conn.exec_driver_sql('UPDATE budget_entries SET treasurer_id = created_by')
+            except OperationalError as exc:
+                if 'duplicate column name' not in str(exc).lower(): raise
