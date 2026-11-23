@@ -127,7 +127,7 @@ class BudgetTests(unittest.TestCase):
                 for _ in range(4):worker.budget_notifications()
                 for payload in telegram.messages.values():
                     self.assertFalse(payload.get('reply_markup',{}).get('inline_keyboard'))
-                self.assertTrue(any(p['chat_id']==101 and '20.00' in p.get('text','') for _,p in telegram.calls))
+                self.assertTrue(any(p['chat_id']==101 and '20.00' in p.get('text',p.get('caption','')) for _,p in telegram.calls))
                 self.assertEqual(self.req('GET')[1]['balances']['cash'],'-20.00')
             finally:store.close()
 
@@ -199,8 +199,76 @@ class BudgetTests(unittest.TestCase):
                     conn.exec_driver_sql('CREATE TABLE users (id INTEGER PRIMARY KEY)')
                     conn.exec_driver_sql('CREATE TABLE positions (id INTEGER PRIMARY KEY, name TEXT, can_comment_cards BOOLEAN)')
                     conn.exec_driver_sql("INSERT INTO positions VALUES (1,'admin',1)")
+                    conn.exec_driver_sql('CREATE TABLE budget_entries (id INTEGER PRIMARY KEY)')
                 with patch.object(database,'engine',engine):
                     database.ensure_schema_upgrades();database.ensure_schema_upgrades()
                 with engine.connect() as conn:
                     self.assertEqual(conn.exec_driver_sql('SELECT name,is_kaznachey FROM positions').fetchall(),[('admin',0)])
+                    self.assertTrue({'deleted_at','deleted_by'} <= {row[1] for row in conn.exec_driver_sql('PRAGMA table_info(budget_entries)')})
             finally:engine.dispose()
+
+    def test_delete_operation_recalculates_and_keeps_request_history(self):
+        row=self.submit();self.finish_notifications()
+        code,result=self.req('POST',f"/requests/{row['id']}/decision",{'decision':'approved','account':'card','expected_amount':'12.34'},'cashier',True,'delete-source')
+        self.assertEqual(code,200,result)
+        entry=self.req('GET')[1]['years'][0]['months'][0]['entries'][0]
+        self.assertEqual(self.req('DELETE',f"/entries/{entry['id']}",{'expected_updated_at':entry['updated_at']},role='member')[0],403)
+        self.assertEqual(self.req('DELETE',f"/entries/{entry['id']}",{'expected_updated_at':entry['updated_at']},role='cashier')[0],200)
+        self.assertEqual(self.req('GET')[1],{'balances':{'cash':'0.00','card':'0.00'},'years':[]})
+        self.assertEqual(self.req('DELETE',f"/entries/{entry['id']}",{'expected_updated_at':entry['updated_at']})[0],200)
+        self.assertEqual(self.req('PATCH',f"/entries/{entry['id']}",{'amount':'25'})[0],404)
+        self.db.expire_all();stored=self.db.get(models.BudgetEntry,entry['id'])
+        self.assertIsNotNone(stored.deleted_at);self.assertEqual(stored.deleted_by,self.users['cashier'])
+        self.assertEqual(self.db.get(models.BudgetRequest,row['id']).status,'approved')
+        self.assertEqual(self.req('POST',f"/requests/{row['id']}/decision",{'decision':'approved','account':'cash','expected_amount':'12.34'},'cashier2',True,'no-reapprove')[0],409)
+
+    def test_finance_responses_identify_creators_and_applicants_without_receipts(self):
+        code,entry=self.req('POST','/entries',{'direction':'income','account':'cash','amount':'10','description':'Opening','operation_at':'2026-11-23T00:00:00Z'})
+        self.assertEqual(code,201,entry);self.assertEqual(entry['created_by_login'],'admin');self.assertEqual(entry['created_by_name'],'admin Test')
+        row=self.submit();pending=self.req('GET','/requests')[1][0]
+        self.assertEqual(pending['applicant_login'],'member');self.assertEqual(pending['applicant_id'],self.users['member'])
+        self.finish_notifications()
+        self.req('POST',f"/requests/{row['id']}/decision",{'decision':'approved','account':'cash','expected_amount':'12.34'},'cashier',True,'author')
+        entries=self.req('GET')[1]['years'][0]['months'][0]['entries']
+        linked=next(e for e in entries if e['request_id'])
+        self.assertEqual(linked['created_by_login'],'cashier');self.assertEqual(linked['applicant_login'],'member')
+        self.assertEqual(linked['applicant_name'],'member Test');self.assertNotIn('private-receipt',str(entries))
+
+    def test_delete_rejects_operation_changed_after_confirmation_was_opened(self):
+        body={'direction':'income','account':'cash','amount':'10','description':'Opening','operation_at':'2026-11-23T00:00:00Z'}
+        code,row=self.req('POST','/entries',body);self.assertEqual(code,201,row)
+        self.req('PATCH',f"/entries/{row['id']}",{'amount':'30','account':'card'})
+        code,result=self.req('DELETE',f"/entries/{row['id']}",{'expected_updated_at':row['updated_at']})
+        self.assertEqual(code,409,result)
+        self.assertEqual(self.req('GET')[1]['balances'],{'cash':'0.00','card':'30.00'})
+
+    def test_result_animation_progress_is_saved_on_its_own_notification(self):
+        import json
+        row=self.submit();self.finish_notifications()
+        self.req('POST',f"/requests/{row['id']}/decision",{'decision':'approved','account':'cash','expected_amount':'12.34'},'cashier',True,'result-progress')
+        events=self.service('/claim',{'limit':20})[1];event=next(e for e in events if e['event_type']=='outcome')
+        code,result=self.service(f"/{event['id']}/ack",{'lease_token':event['lease_token'],'outcome':'progress','outcome_message_id':77})
+        self.assertEqual(code,200,result)
+        self.db.expire_all();saved=self.db.get(models.BudgetNotification,event['id'])
+        self.assertEqual(json.loads(saved.payload)['outcome_message_id'],77)
+        self.service(f"/{event['id']}/ack",{'lease_token':event['lease_token'],'outcome':'retry','retry_after':1})
+        self.db.expire_all();saved=self.db.get(models.BudgetNotification,event['id'])
+        from datetime import datetime,timedelta
+        saved.next_attempt_at=datetime.utcnow()-timedelta(seconds=1);self.db.commit()
+        retry=next(e for e in self.service('/claim',{'limit':20})[1] if e['event_type']=='outcome')
+        self.assertEqual(retry['outcome_message_id'],77)
+
+    def test_ledger_author_details_do_not_query_each_request_separately(self):
+        from sqlalchemy import event
+        for i in range(15):
+            request=models.BudgetRequest(request_type='add_funds',applicant_id=self.users['member'],applicant_name='Member',department_snapshot='[]',description='Donation',submitted_amount=1,amount=1,status='approved')
+            self.db.add(request);self.db.flush()
+            self.db.add(models.BudgetEntry(direction='income',account='cash',amount=1,description='Donation',created_by=self.users['cashier'],updated_by=self.users['admin'],request_id=request.id))
+        self.db.commit();queries=[]
+        def collect(conn,cursor,statement,parameters,context,executemany):
+            if statement.lstrip().upper().startswith('SELECT'):queries.append(statement)
+        event.listen(database.engine,'before_cursor_execute',collect)
+        try:
+            code,result=self.req('GET');self.assertEqual(code,200,result)
+            self.assertLess(len(queries),10,len(queries))
+        finally:event.remove(database.engine,'before_cursor_execute',collect)

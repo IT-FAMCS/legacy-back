@@ -8,7 +8,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 import models
 from database import get_db
@@ -72,6 +72,10 @@ class EntryUpdate(Input):
         return Amount.validate_amount(value)
 
 
+class EntryDelete(Input):
+    expected_updated_at: datetime
+
+
 class RequestCreate(Amount):
     request_type: Literal['reimbursement', 'add_funds']
     description: str = Field(min_length=1, max_length=1500)
@@ -114,11 +118,17 @@ class Ack(Input):
     outcome: Literal['delivered', 'retry', 'permanent', 'blocked', 'progress']
     detail_message_id: Optional[int] = Field(default=None, gt=0)
     photo_message_id: Optional[int] = Field(default=None, gt=0)
+    outcome_message_id: Optional[int] = Field(default=None, gt=0)
     retry_after: int = Field(default=30, ge=1, le=86400)
+
+
+def person_name(user):
+    return ' '.join(filter(None, [user.last_name, user.first_name, user.middle_name])) if user else None
 
 
 def request_data(row):
     return dict(id=row.id, request_type=row.request_type, applicant_name=row.applicant_name,
+                applicant_id=row.applicant_id, applicant_login=row.applicant.login if row.applicant else None,
                 departments=json.loads(row.department_snapshot), description=row.description,
                 submitted_amount=money(row.submitted_amount), amount=money(row.amount),
                 payout_details=row.payout_details, status=row.status, account=row.account,
@@ -128,9 +138,14 @@ def request_data(row):
 
 
 def entry_data(row):
-    return {key: money(getattr(row, key)) if key == 'amount' else getattr(row, key)
-            for key in ('id', 'direction', 'account', 'amount', 'description', 'operation_at',
-                        'request_id', 'created_by', 'updated_by', 'created_at', 'updated_at')}
+    result = {key: money(getattr(row, key)) if key == 'amount' else getattr(row, key)
+              for key in ('id', 'direction', 'account', 'amount', 'description', 'operation_at',
+                          'request_id', 'created_by', 'updated_by', 'created_at', 'updated_at')}
+    result.update(created_by_name=person_name(row.creator), created_by_login=row.creator.login if row.creator else None,
+                  updated_by_name=person_name(row.editor), updated_by_login=row.editor.login if row.editor else None,
+                  applicant_name=row.request.applicant_name if row.request else None,
+                  applicant_login=row.request.applicant.login if row.request and row.request.applicant else None)
+    return result
 
 
 def active(binding):
@@ -175,7 +190,10 @@ def create_budget_router(*, get_current_user, is_executive):
     def ledger(user=Depends(manager), db: Session=Depends(get_db)):
         balances = dict(cash=Decimal(0), card=Decimal(0))
         groups = {}
-        for row in db.query(models.BudgetEntry).order_by(models.BudgetEntry.operation_at.desc(), models.BudgetEntry.id.desc()).all():
+        for row in db.query(models.BudgetEntry).options(
+            joinedload(models.BudgetEntry.creator), joinedload(models.BudgetEntry.editor),
+            joinedload(models.BudgetEntry.request).joinedload(models.BudgetRequest.applicant)
+        ).filter(models.BudgetEntry.deleted_at.is_(None)).order_by(models.BudgetEntry.operation_at.desc(), models.BudgetEntry.id.desc()).all():
             balances[row.account] += row.amount if row.direction == 'income' else -row.amount
             local = row.operation_at + timedelta(hours=3)
             groups.setdefault(local.year, {}).setdefault(local.month, []).append(entry_data(row))
@@ -196,6 +214,7 @@ def create_budget_router(*, get_current_user, is_executive):
     def edit_entry(rid: int, data: EntryUpdate, user=Depends(manager), db: Session=Depends(get_db)):
         begin_task_write(db)
         row = find(db, models.BudgetEntry, rid)
+        if row.deleted_at is not None: raise HTTPException(404, 'Операция удалена')
         for key, value in data.model_dump(exclude_unset=True).items():
             if key == 'operation_at' and value.tzinfo:
                 value = value.astimezone(timezone.utc).replace(tzinfo=None)
@@ -204,9 +223,22 @@ def create_budget_router(*, get_current_user, is_executive):
         db.commit(); db.refresh(row)
         return entry_data(row)
 
+    @router.delete('/api/budget/entries/{rid}')
+    def delete_entry(rid: int, data: EntryDelete, user=Depends(manager), db: Session=Depends(get_db)):
+        begin_task_write(db)
+        row = find(db, models.BudgetEntry, rid)
+        if row.deleted_at is None:
+            expected = data.expected_updated_at
+            if expected.tzinfo: expected = expected.astimezone(timezone.utc).replace(tzinfo=None)
+            if row.updated_at != expected:
+                raise HTTPException(409, 'Операция была изменена. Обновите данные и подтвердите удаление заново.')
+            row.deleted_at, row.deleted_by = now(), user.id
+        db.commit()
+        return {'ok': True}
+
     @router.get('/api/budget/requests')
     def requests(status: Literal['pending']='pending', user=Depends(manager), db: Session=Depends(get_db)):
-        return [request_data(row) for row in db.query(models.BudgetRequest).filter_by(status=status).order_by(models.BudgetRequest.created_at).all()]
+        return [request_data(row) for row in db.query(models.BudgetRequest).options(joinedload(models.BudgetRequest.applicant), selectinload(models.BudgetRequest.amount_changes)).filter_by(status=status).order_by(models.BudgetRequest.created_at).all()]
 
     @router.patch('/api/budget/requests/{rid}')
     def correct(rid: int, data: Amount, user=Depends(manager), db: Session=Depends(get_db)):
@@ -315,7 +347,8 @@ def create_budget_router(*, get_current_user, is_executive):
                 telegram_file_id=row.telegram_file_id if event.event_type in ('request', 'correction') else None,
                 telegram_user_id=binding.telegram_user_id, chat_id=binding.chat_id, generation=binding.generation,
                 lease_token=event.lease_token, detail_message_id=delivery.detail_message_id if delivery else None,
-                photo_message_id=delivery.photo_message_id if delivery else None))
+                photo_message_id=delivery.photo_message_id if delivery else None,
+                outcome_message_id=json.loads(event.payload or '{}').get('outcome_message_id')))
         db.commit()
         return result
 
@@ -349,6 +382,10 @@ def create_budget_router(*, get_current_user, is_executive):
                 db.add(delivery)
             if data.detail_message_id: delivery.detail_message_id = data.detail_message_id
             if data.photo_message_id: delivery.photo_message_id = data.photo_message_id
+        if data.outcome_message_id:
+            payload = json.loads(event.payload or '{}')
+            payload['outcome_message_id'] = data.outcome_message_id
+            event.payload = json.dumps(payload)
         if data.outcome == 'progress':
             db.commit()
             return {'ok': True}

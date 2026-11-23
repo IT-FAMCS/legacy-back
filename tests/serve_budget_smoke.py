@@ -14,7 +14,7 @@ if __name__=='__main__':
             for login in ['admin','member','cashier']:
                 position=models.Position(name=login,is_kaznachey=login=='cashier',can_manage_positions=login=='admin')
                 db.add(position);db.flush()
-                user=models.User(login=login,first_name=login,last_name='Test',password_hash=password,position_id=position.id)
+                user=models.User(login=login,first_name='Михаил' if login=='member' else login,last_name='Семёнов' if login=='member' else 'Test',password_hash=password,position_id=position.id)
                 db.add(user);db.flush();users[login]=user
             db.add(models.BudgetEntry(direction='income',account='cash',amount=300,description='Opening cash',operation_at=datetime(2025,12,1),created_by=users['admin'].id,updated_by=users['admin'].id))
             db.add(models.BudgetEntry(direction='expense',account='card',amount=50,description='Equipment',operation_at=datetime(2026,1,1),created_by=users['admin'].id,updated_by=users['admin'].id))

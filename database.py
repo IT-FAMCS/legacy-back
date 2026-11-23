@@ -126,3 +126,13 @@ def ensure_schema_upgrades() -> None:
             except OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
+
+    with engine.begin() as conn:
+        budget_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(budget_entries)").fetchall()}
+        for column, sql_type in {"deleted_at": "DATETIME", "deleted_by": "INTEGER REFERENCES users(id)"}.items():
+            if budget_columns and column not in budget_columns:
+                try:
+                    conn.exec_driver_sql(f"ALTER TABLE budget_entries ADD COLUMN {column} {sql_type}")
+                except OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise

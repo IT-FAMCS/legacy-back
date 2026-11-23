@@ -426,6 +426,8 @@ class BudgetEntry(Base):
     created_by = Column(Integer, ForeignKey('users.id'), nullable=False)
     updated_by = Column(Integer, ForeignKey('users.id'), nullable=False)
     request_id = Column(Integer, ForeignKey('budget_requests.id'), unique=True)
+    deleted_at = Column(DateTime)
+    deleted_by = Column(Integer, ForeignKey('users.id'))
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
     creator = relationship('User', foreign_keys=[created_by])
