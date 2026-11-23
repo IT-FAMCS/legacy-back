@@ -18,6 +18,7 @@ class PositionCreate(BaseModel):
     can_edit_any_user: bool = False
     can_manage_positions: bool = False
     can_comment_cards: bool = False
+    is_kaznachey: bool = False
 
 
 class PositionUpdate(BaseModel):
@@ -32,6 +33,7 @@ class PositionUpdate(BaseModel):
     can_edit_any_user: Optional[bool] = None
     can_manage_positions: Optional[bool] = None
     can_comment_cards: Optional[bool] = None
+    is_kaznachey: Optional[bool] = None
 
 
 class PositionResponse(BaseModel):
@@ -47,6 +49,7 @@ class PositionResponse(BaseModel):
     can_edit_any_user: bool
     can_manage_positions: bool
     can_comment_cards: bool
+    is_kaznachey: bool
     created_at: datetime
 
     class Config:
@@ -196,6 +199,8 @@ class UserResponse(AccountContactFields):
     last_login: Optional[datetime] = None
     last_seen_at: Optional[datetime] = None
     password_changed_at: Optional[datetime] = None
+    is_kaznachey: bool = False
+    can_view_budget: bool = False
 
     class Config:
         from_attributes = True

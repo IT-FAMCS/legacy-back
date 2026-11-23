@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, CheckConstraint
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, CheckConstraint, Numeric
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
@@ -18,6 +18,7 @@ class Position(Base):
     can_edit_any_user = Column(Boolean, default=False)
     can_manage_positions = Column(Boolean, default=False)
     can_comment_cards = Column(Boolean, default=False)
+    is_kaznachey = Column(Boolean, nullable=False, default=False, server_default='0')
     created_at = Column(DateTime, default=datetime.utcnow)
 
     users = relationship("User", back_populates="position_ref")
@@ -378,6 +379,87 @@ class ResponsibilityZone(Base):
     __mapper_args__ = {'version_id_col': version}
     lead = relationship('User', foreign_keys=[lead_user_id])
     helper_links = relationship('ResponsibilityHelper', cascade='all, delete-orphan', lazy='selectin')
+
+
+class BudgetRequest(Base):
+    __tablename__ = 'budget_requests'
+    id = Column(Integer, primary_key=True)
+    request_type = Column(String(24), nullable=False, index=True)
+    applicant_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    applicant_name = Column(String(240), nullable=False)
+    department_snapshot = Column(Text, nullable=False, default='[]')
+    description = Column(Text, nullable=False)
+    submitted_amount = Column(Numeric(12, 2), nullable=False)
+    amount = Column(Numeric(12, 2), nullable=False)
+    payout_details = Column(Text)
+    telegram_file_id = Column(Text)
+    status = Column(String(20), nullable=False, default='pending', index=True)
+    decision = Column(String(20))
+    account = Column(String(12))
+    processed_by = Column(Integer, ForeignKey('users.id'))
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    processed_at = Column(DateTime)
+    applicant = relationship('User', foreign_keys=[applicant_id])
+    processor = relationship('User', foreign_keys=[processed_by])
+    amount_changes = relationship('BudgetRequestAmountChange', cascade='all, delete-orphan', order_by='BudgetRequestAmountChange.id')
+
+
+class BudgetRequestAmountChange(Base):
+    __tablename__ = 'budget_request_amount_changes'
+    id = Column(Integer, primary_key=True)
+    request_id = Column(Integer, ForeignKey('budget_requests.id'), nullable=False, index=True)
+    old_amount = Column(Numeric(12, 2), nullable=False)
+    new_amount = Column(Numeric(12, 2), nullable=False)
+    editor_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    editor = relationship('User')
+
+
+class BudgetEntry(Base):
+    __tablename__ = 'budget_entries'
+    id = Column(Integer, primary_key=True)
+    direction = Column(String(12), nullable=False)
+    account = Column(String(12), nullable=False)
+    amount = Column(Numeric(12, 2), nullable=False)
+    description = Column(Text, nullable=False)
+    operation_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_by = Column(Integer, ForeignKey('users.id'), nullable=False)
+    updated_by = Column(Integer, ForeignKey('users.id'), nullable=False)
+    request_id = Column(Integer, ForeignKey('budget_requests.id'), unique=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    creator = relationship('User', foreign_keys=[created_by])
+    editor = relationship('User', foreign_keys=[updated_by])
+    request = relationship('BudgetRequest')
+
+
+class BudgetNotification(Base):
+    __tablename__ = 'budget_notifications'
+    id = Column(Integer, primary_key=True)
+    event_type = Column(String(24), nullable=False)
+    request_id = Column(Integer, ForeignKey('budget_requests.id'), nullable=False, index=True)
+    recipient_user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    binding_id = Column(Integer, ForeignKey('telegram_bindings.id'), nullable=False)
+    generation = Column(String(64), nullable=False)
+    state = Column(String(16), nullable=False, default='pending', index=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    next_attempt_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    lease_token = Column(String(64))
+    lease_until = Column(DateTime)
+    payload = Column(Text)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class BudgetNotificationDelivery(Base):
+    __tablename__ = 'budget_notification_deliveries'
+    id = Column(Integer, primary_key=True)
+    request_id = Column(Integer, ForeignKey('budget_requests.id'), nullable=False, index=True)
+    binding_id = Column(Integer, ForeignKey('telegram_bindings.id'), nullable=False)
+    generation = Column(String(64), nullable=False)
+    detail_message_id = Column(Integer)
+    photo_message_id = Column(Integer)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = (CheckConstraint('request_id > 0'),)
 
 
 class ResponsibilityHelper(Base):

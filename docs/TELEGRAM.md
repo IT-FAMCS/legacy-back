@@ -29,3 +29,16 @@ Browser smoke: start `tests/serve_telegram_smoke.py` (port8014) with the backend
 Every bound bot mutation also requires X-Telegram-Binding matching the current generation. The chat client sends the generation it resolved before processing a callback; a rebind between reading and writing fails closed.
 
 If a parent event is deleted after its last zone is removed, its auxiliary board and card-ID keyed zone history are removed in the same transaction. This prevents orphan constraints and old private history attaching to a reused card ID. Task audit history is unchanged.
+
+
+## Shared budget (BYN)
+
+Deploy the budget versions of legacy-back, legacy-frontend and tg-bot together. Point the bot BACKEND_URL to the same legacy-back installation used by the website. No new secrets or external accounting service are required. Existing service authentication and the persistent bot volume remain required.
+
+Enable `is_kaznachey` on the appropriate Positions in the website. Multiple users can be cashiers. Each cashier must have an active Legacy account, explicitly confirmed Telegram binding and an unblocked private conversation with the bot. Without any available cashier, request confirmation is rejected and the participant draft is retained. To recover, enable the cashier flag, link/confirm Telegram from the account profile and start the bot. Cashier notifications are independent of task notification preferences.
+
+The site `/budget` shows cash/card balances, dated monthly tables and pending requests without receipt images or Telegram file identifiers. Admin, chair/deputies and cashiers can add/edit entries and correct pending amounts. Decisions remain in Telegram. Approved reimbursements create expenses; approved add-funds requests create income. Rejection adds no ledger entry. Editing an approved ledger row changes balances while the original processed request remains immutable. Negative balances are allowed. Initial balances are zero; no historical import runs.
+
+Finance events use `/api/telegram/budget/notifications/claim`, `/{id}/validate`, and `/{id}/ack` with service authentication. Delivery is leased for two minutes and ordered per request/binding. First messages have no buttons until a progress acknowledgement stores their ID; retries edit that canonical message. Before sending receipt/details or enabling actions, the worker revalidates the lease, binding, status and current cashier permission. Corrections must finish delivery to available cashiers before approval is allowed. Decisions atomically update the request and unique linked ledger entry and enqueue applicant results and cashier cleanup. Stale callbacks cannot repeat a decision. A Telegram 403 marks the binding blocked.
+
+Telegram sends and HTTP acknowledgements cannot form one transaction: a lost response can duplicate a passive preparation message or receipt/result notification. Only the durably recorded canonical detail receives action buttons; financial effects remain idempotent. Pending Telegram updates may take several polling intervals. Keep the bot worker running; its queue is retried independently of request persistence. Schema startup adds the false-by-default cashier flag and creates new tables without rewriting existing data.

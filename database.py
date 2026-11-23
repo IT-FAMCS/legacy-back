@@ -73,6 +73,13 @@ def ensure_schema_upgrades() -> None:
             # already made it with the current schema, nothing to patch.
             return
 
+        if "is_kaznachey" not in existing_position_columns:
+            try:
+                conn.exec_driver_sql("ALTER TABLE positions ADD COLUMN is_kaznachey BOOLEAN NOT NULL DEFAULT 0")
+            except OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+
         if "can_comment_cards" not in existing_position_columns:
             try:
                 conn.exec_driver_sql("ALTER TABLE positions ADD COLUMN can_comment_cards BOOLEAN DEFAULT 0")

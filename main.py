@@ -595,6 +595,8 @@ def format_user_response(user: models.User, db: Session) -> dict:
     return {
         **user.__dict__,
         "position_name": user.position_ref.name,
+        "is_kaznachey": bool(user.position_ref.is_kaznachey),
+        "can_view_budget": is_admin_chair_or_deputy(user.position_ref) or bool(user.position_ref.is_kaznachey),
         "departments": get_user_departments(user, db)
     }
 
@@ -1604,3 +1606,7 @@ from responsibility_zones import create_zone_router
 app.include_router(create_zone_router(get_current_user=get_current_user,has_access_to_card=has_access_to_card))
 app.include_router(create_zone_router(get_current_user=bot_actor,has_access_to_card=has_access_to_card,
     prefix='/api/telegram/bot/events',bot_mode=True))
+
+
+from budget import create_budget_router
+app.include_router(create_budget_router(get_current_user=get_current_user, is_executive=is_admin_chair_or_deputy))
