@@ -82,13 +82,16 @@ class RequestCreate(Amount):
     request_type: Literal['reimbursement', 'add_funds']
     description: str = Field(min_length=1, max_length=1500)
     payout_details: Optional[str] = Field(default=None, min_length=1, max_length=500)
+    saved_payout_id: Optional[int] = Field(default=None, gt=0)
     telegram_file_id: Optional[str] = Field(default=None, min_length=1, max_length=512)
 
     @model_validator(mode='after')
     def required_details(self):
-        if self.request_type == 'reimbursement' and (not self.payout_details or not self.telegram_file_id):
+        if self.request_type == 'reimbursement' and (not (self.payout_details or self.saved_payout_id) or not self.telegram_file_id):
             raise ValueError('Для возврата нужны реквизиты и фото чека')
-        if self.request_type == 'add_funds' and self.payout_details:
+        if self.payout_details and self.saved_payout_id:
+            raise ValueError('Выберите сохранённые реквизиты либо введите новые')
+        if self.request_type == 'add_funds' and (self.payout_details or self.saved_payout_id):
             raise ValueError('Для пополнения реквизиты не нужны')
         return self
 
@@ -210,7 +213,7 @@ def create_budget_router(*, get_current_user, is_executive):
             balances[row.account] += row.amount if row.direction == 'income' else -row.amount
             local = row.operation_at + timedelta(hours=3)
             groups.setdefault(local.year, {}).setdefault(local.month, []).append(entry_data(row))
-        return dict(can_import=user.position_ref.name.strip().lower() in ('admin', 'админ'), balances={k: money(v) for k, v in balances.items()}, years=[
+        return dict(total=money(sum(balances.values())), can_import=user.position_ref.name.strip().lower() in ('admin', 'админ'), balances={k: money(v) for k, v in balances.items()}, years=[
             dict(year=year, months=[dict(month=month, entries=entries, **monthly_totals(entries)) for month, entries in months.items()])
             for year, months in groups.items()])
 
@@ -269,12 +272,18 @@ def create_budget_router(*, get_current_user, is_executive):
 
     @router.post('/api/telegram/bot/budget/requests', status_code=201)
     def submit(data: RequestCreate, user=Depends(bot_actor), db: Session=Depends(get_db)):
+        from personal_data import require_service_consent
+        require_service_consent(db,user.id)
         saved = replay(db, user)
         if saved is not None: return saved
         recipients = cashiers(db)
         if not recipients:
             raise HTTPException(409, 'Заявку пока не удалось отправить. Черновик сохранён; попробуйте позже.')
-        row = models.BudgetRequest(**data.model_dump(), submitted_amount=data.amount, applicant_id=user.id,
+        values=data.model_dump(exclude={'saved_payout_id'})
+        if data.saved_payout_id is not None:
+            from personal_data import resolve_saved
+            values['payout_details']=resolve_saved(db,user.id,data.saved_payout_id)
+        row = models.BudgetRequest(**values, submitted_amount=data.amount, applicant_id=user.id,
             applicant_name=' '.join(filter(None, [user.last_name, user.first_name, user.middle_name])),
             department_snapshot=json.dumps([link.department.name for link in user.departments], ensure_ascii=False))
         db.add(row); db.flush()

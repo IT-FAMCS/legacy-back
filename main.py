@@ -1610,3 +1610,6 @@ app.include_router(create_zone_router(get_current_user=bot_actor,has_access_to_c
 
 from budget import create_budget_router
 app.include_router(create_budget_router(get_current_user=get_current_user, is_executive=is_admin_chair_or_deputy))
+
+from personal_data import create_personal_data_router
+app.include_router(create_personal_data_router(get_current_user))

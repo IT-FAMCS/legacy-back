@@ -7,6 +7,11 @@ services:
       - "8000:8000"
     environment:
       - PORT=8000
+      - PERSONAL_DATA_OPERATOR=${PERSONAL_DATA_OPERATOR:-}
+      - PERSONAL_DATA_ADDRESS=${PERSONAL_DATA_ADDRESS:-}
+      - PERSONAL_DATA_CONTACT=${PERSONAL_DATA_CONTACT:-}
+      - PERSONAL_DATA_PROCESSORS=${PERSONAL_DATA_PROCESSORS:-}
+      - PERSONAL_DATA_RETENTION=${PERSONAL_DATA_RETENTION:-}
       - SECRET_KEY=your-secret-key-change-in-production
     volumes:
       - ./app.db:/app/app.db

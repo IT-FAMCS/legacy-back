@@ -1,12 +1,23 @@
 import asyncio
 import os
 import unittest
+import json
+from unittest.mock import patch
+
+PRIVACY_SETTINGS={
+    "PERSONAL_DATA_OPERATOR":"Test operator",
+    "PERSONAL_DATA_ADDRESS":"Test address",
+    "PERSONAL_DATA_CONTACT":"privacy@example.org",
+    "PERSONAL_DATA_PROCESSORS":"Test hosting in Belarus; Telegram for bot messages",
+    "PERSONAL_DATA_RETENTION":"For membership duration; requests 12 months after settlement",
+}
 from concurrent.futures import ThreadPoolExecutor
 from test_trainee_access import asgi_request
 import main, models, database
 
 class BudgetTests(unittest.TestCase):
     def setUp(self):
+        settings=patch.dict(os.environ,PRIVACY_SETTINGS);settings.start();self.addCleanup(settings.stop)
         models.Base.metadata.drop_all(database.engine)
         models.Base.metadata.create_all(database.engine)
         os.environ['TELEGRAM_SERVICE_KEY']='b'*40
@@ -18,6 +29,10 @@ class BudgetTests(unittest.TestCase):
             user=models.User(login=role,first_name='Test',last_name=role,password_hash='unused',position_id=pos.id)
             self.db.add(user); self.db.flush()
             self.users[role]=user.id
+            if getattr(self,'seed_budget_consent',True):
+                from personal_data import policy
+                current=policy()
+                self.db.add(models.PersonalDataConsent(user_id=user.id,scope='service',version=current['version'],policy_snapshot=json.dumps(current),source='web'))
             self.db.add(models.TelegramBinding(user_id=user.id,telegram_user_id=100+i,chat_id=100+i,generation=role,active=True))
         self.db.commit()
     def tearDown(self):
@@ -214,7 +229,7 @@ class BudgetTests(unittest.TestCase):
         entry=self.req('GET')[1]['years'][0]['months'][0]['entries'][0]
         self.assertEqual(self.req('DELETE',f"/entries/{entry['id']}",{'expected_updated_at':entry['updated_at']},role='member')[0],403)
         self.assertEqual(self.req('DELETE',f"/entries/{entry['id']}",{'expected_updated_at':entry['updated_at']},role='cashier')[0],200)
-        self.assertEqual(self.req('GET')[1],{'can_import':True,'balances':{'cash':'0.00','card':'0.00'},'years':[]})
+        self.assertEqual(self.req('GET')[1],{'total':'0.00','can_import':True,'balances':{'cash':'0.00','card':'0.00'},'years':[]})
         self.assertEqual(self.req('DELETE',f"/entries/{entry['id']}",{'expected_updated_at':entry['updated_at']})[0],200)
         self.assertEqual(self.req('PATCH',f"/entries/{entry['id']}",{'amount':'25'})[0],404)
         self.db.expire_all();stored=self.db.get(models.BudgetEntry,entry['id'])

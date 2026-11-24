@@ -512,3 +512,25 @@ class BudgetCustodyAdjustment(Base):
     balance_after = Column(Numeric(12, 2), nullable=False)
     created_by = Column(Integer, ForeignKey('users.id'), nullable=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class PersonalDataConsent(Base):
+    __tablename__ = 'personal_data_consents'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    scope = Column(String(24), nullable=False)
+    version = Column(String(64), nullable=False)
+    policy_snapshot = Column(Text, nullable=False)
+    source = Column(String(16), nullable=False)
+    accepted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    revoked_at = Column(DateTime)
+
+
+class SavedPayoutDetail(Base):
+    __tablename__ = 'saved_payout_details'
+    __table_args__ = {'sqlite_autoincrement': True}
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    label = Column(String(60), nullable=False)
+    details = Column(String(500), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

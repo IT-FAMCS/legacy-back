@@ -8,6 +8,7 @@ if __name__=='__main__':
         os.environ['DATABASE_URL']='sqlite:///'+directory.replace('\\','/')+'/test.db'
         os.environ['SECRET_KEY']='isolated-budget-browser'
         os.environ['ALLOWED_ORIGINS']='http://127.0.0.1:4176'
+        os.environ.update(PERSONAL_DATA_OPERATOR='Browser test operator',PERSONAL_DATA_ADDRESS='Test address',PERSONAL_DATA_CONTACT='privacy@example.org',PERSONAL_DATA_PROCESSORS='Local isolated test server; Telegram test transport',PERSONAL_DATA_RETENTION='Test session only')
         import main,models,database,uvicorn
         with database.SessionLocal() as db:
             password=main.hash_password('smoke-password');users={}
