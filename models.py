@@ -41,6 +41,7 @@ class User(Base):
     position_id = Column(Integer, ForeignKey("positions.id"), nullable=False)
     
     telegram = Column(String)
+    raccoon_enabled = Column(Boolean, nullable=False, default=True)
     phone = Column(String(40))
     education_format = Column(String(16))
     
@@ -76,7 +77,7 @@ class Department(Base):
     description = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    users = relationship("UserDepartment", back_populates="department")
+    users = relationship("UserDepartment", back_populates="department", cascade="all, delete-orphan")
 
 
 class Category(Base):

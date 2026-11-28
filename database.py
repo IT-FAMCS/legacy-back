@@ -45,6 +45,7 @@ def ensure_schema_upgrades() -> None:
         return
 
     users_columns_to_add = {
+        "raccoon_enabled": "BOOLEAN NOT NULL DEFAULT 1",
         "password_changed_at": "DATETIME",
         "last_seen_at": "DATETIME",
         "phone": "VARCHAR(40)",

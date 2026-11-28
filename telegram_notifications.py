@@ -27,7 +27,7 @@ def muted(db, user_id, task_id):
     ).first() is not None
 
 
-def enqueue_assignment_changes(db, task, before, after, actor, check_card, record):
+def enqueue_assignment_changes(db, task, before, after, actor, check_card, record, bindings=None):
     """Store one event per recipient in the task transaction."""
     previous = set(before['assignee_ids']) if before else set()
     current = set(after['assignee_ids'])
@@ -47,9 +47,12 @@ def enqueue_assignment_changes(db, task, before, after, actor, check_card, recor
     recipients.discard(actor.id)
     if not recipients:
         return
-    bindings = db.query(models.TelegramBinding).filter(
-        models.TelegramBinding.active.is_(True), models.TelegramBinding.user_id.in_(recipients),
-    ).all()
+    if bindings is None:
+        bindings = db.query(models.TelegramBinding).filter(
+            models.TelegramBinding.active.is_(True), models.TelegramBinding.user_id.in_(recipients),
+        ).all()
+    else:
+        bindings = [binding for binding in bindings if binding.user_id in recipients]
     clock = now()
     for binding in bindings:
         uid = binding.user_id

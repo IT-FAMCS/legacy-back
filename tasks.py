@@ -77,6 +77,15 @@ class TaskVersion(BaseModel):
     version: int = Field(gt=0)
 
 
+class TaskReference(TaskVersion):
+    id: int = Field(gt=0)
+
+
+class TaskBulkArchive(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tasks: list[TaskReference] = Field(min_length=1, max_length=5000)
+
+
 def begin_task_write(db):
     """Serialize link validation with card deletion/category changes across workers."""
     if db.bind.dialect.name == 'sqlite':
@@ -185,14 +194,14 @@ def create_tasks_router(*, get_current_user, has_access_to_card, can_delete_task
             else:
                 setattr(task, key, value)
 
-    def history(db, task, actor, action, before):
+    def history(db, task, actor, action, before, notification_bindings=None):
         after = serialize(task)
         record = models.TaskHistory(task_id=task.id, actor_id=actor.id, actor_name=display_name(actor),
             action=action, before_json=json.dumps(before, ensure_ascii=False) if before else None,
             after_json=json.dumps(after, ensure_ascii=False), created_at=now())
         db.add(record)
         from telegram_notifications import enqueue_assignment_changes
-        enqueue_assignment_changes(db, task, before, after, actor, has_access_to_card, record)
+        enqueue_assignment_changes(db, task, before, after, actor, has_access_to_card, record, bindings=notification_bindings)
 
     def commit(db):
         try:
@@ -297,6 +306,62 @@ def create_tasks_router(*, get_current_user, has_access_to_card, can_delete_task
         remember(db, user, result)
         commit(db)
         return result
+
+    @router.post("/archive-completed")
+    def archive_completed(data: TaskBulkArchive, user=Depends(get_current_user), db: Session = Depends(get_db)):
+        if not can_delete_tasks(user.position_ref):
+            raise HTTPException(403, "Недостаточно прав для переноса тасок в архив")
+        begin_task_write(db)
+        ids = [item.id for item in data.tasks]
+        if len(ids) != len(set(ids)):
+            raise HTTPException(422, "Таски не должны повторяться")
+        tasks_by_id = {task.id: task for task in query(db).filter(models.Task.id.in_(ids)).all()}
+        selected = []
+        for item in data.tasks:
+            task = tasks_by_id.get(item.id)
+            if task is None or not accessible(task, user):
+                raise HTTPException(404, "Таска не найдена или недоступна")
+            if task.archived or not task.completed or task.version != item.version:
+                raise HTTPException(409, "Список тасок изменился. Обновите страницу и повторите действие.")
+            selected.append(task)
+        recipients = {task.creator_id for task in selected}
+        recipients.update(link.user_id for task in selected for link in task.assignee_links)
+        recipients.discard(user.id)
+        bindings = db.query(models.TelegramBinding).options(selectinload(models.TelegramBinding.user)).filter(
+            models.TelegramBinding.active.is_(True), models.TelegramBinding.user_id.in_(recipients)).all() if recipients else []
+        try:
+            snapshots = [(task, serialize(task)) for task in selected]
+            for task in selected:
+                task.archived = True
+                task.updated_at = now()
+            db.flush()
+            for task, before in snapshots:
+                history(db, task, user, "archive", before, notification_bindings=bindings)
+            commit(db)
+        except StaleDataError:
+            db.rollback()
+            raise HTTPException(409, "Список тасок изменился. Обновите страницу.")
+        return {"count": len(selected)}
+
+    @router.post("/{task_id}/restore")
+    def restore_task(task_id: int, data: TaskVersion, user=Depends(get_current_user), db: Session = Depends(get_db)):
+        if not can_delete_tasks(user.position_ref):
+            raise HTTPException(403, "Недостаточно прав для восстановления таски")
+        begin_task_write(db)
+        task = get_task(db, task_id, user)
+        if not task.archived or task.version != data.version:
+            raise HTTPException(409, "Таска изменилась или уже восстановлена. Обновите страницу.")
+        before = serialize(task)
+        task.archived = False
+        task.updated_at = now()
+        try:
+            db.flush()
+            history(db, task, user, "restore", before)
+            commit(db)
+        except StaleDataError:
+            db.rollback()
+            raise HTTPException(409, "Таска уже изменена. Обновите страницу.")
+        return task_response(task, user)
 
     @router.get("/{task_id}")
     def read_task(task_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):

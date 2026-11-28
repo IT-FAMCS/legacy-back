@@ -201,9 +201,15 @@ class UserResponse(AccountContactFields):
     password_changed_at: Optional[datetime] = None
     is_kaznachey: bool = False
     can_view_budget: bool = False
+    can_edit_self: bool = False
+    raccoon_enabled: bool = True
 
     class Config:
         from_attributes = True
+
+
+class ProfilePreferences(BaseModel):
+    raccoon_enabled: bool
 
 
 class Token(BaseModel):

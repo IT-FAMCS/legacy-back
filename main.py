@@ -499,6 +499,15 @@ async def delete_position(
 
 # ============ USER MANAGEMENT ENDPOINTS ============
 
+def begin_department_write(db: Session) -> None:
+    # Same reservation on registration, membership updates and deletion prevents
+    # a validated department disappearing before the membership insert commits.
+    from tasks import begin_task_write
+    begin_task_write(db)
+    if db.bind.dialect.name != 'sqlite':
+        db.query(models.Department).order_by(models.Department.id).with_for_update().all()
+
+
 def get_user_departments(user: models.User, db: Session) -> List[dict]:
     """Get list of departments for a user"""
     user_depts = db.query(models.UserDepartment).filter(
@@ -590,11 +599,18 @@ def create_user_with_relations(
 
     return new_user
 
+def can_edit_self(position) -> bool:
+    return bool(position and normalize_position_name(position) not in {
+        "участник", "обычный участник", "участник студсовета"
+    })
+
+
 def format_user_response(user: models.User, db: Session) -> dict:
     """Format user response with departments list"""
     return {
         **user.__dict__,
         "position_name": user.position_ref.name,
+        "can_edit_self": can_edit_self(user.position_ref),
         "is_kaznachey": bool(user.position_ref.is_kaznachey),
         "can_view_budget": is_admin_chair_or_deputy(user.position_ref) or bool(user.position_ref.is_kaznachey),
         "departments": get_user_departments(user, db)
@@ -613,6 +629,7 @@ async def register_user(
             detail="Недостаточно прав для регистрации пользователей"
         )
 
+    begin_department_write(db)
     validation_result = validate_user_registration_data(user_data, current_user, db)
     new_user = create_user_with_relations(
         user_data=user_data,
@@ -647,6 +664,7 @@ async def register_users_bulk(
             detail=f"В запросе повторяются логины: {', '.join(duplicated_logins)}"
         )
 
+    begin_department_write(db)
     prepared_users = []
     for user_data in users_data.users:
         validation_result = validate_user_registration_data(user_data, current_user, db)
@@ -737,13 +755,24 @@ async def update_user_data(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    # Users cannot edit themselves
     if target_login == current_user.login:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Пользователи не могут редактировать себя. Обратитесь к администратору."
-        )
-    
+        if not can_edit_self(current_user.position_ref):
+            raise HTTPException(403, "Участники не могут редактировать свой профиль. Обратитесь к администратору.")
+        values = user_update.model_dump(exclude_unset=True)
+        allowed = {"first_name", "last_name", "middle_name", "birth_date", "course", "group",
+                   "telegram", "phone", "education_format"}
+        if values.keys() - allowed:
+            raise HTTPException(403, "Самостоятельно можно изменять только личные данные")
+        for field, value in values.items():
+            if field in {"first_name", "last_name"} and (value is None or not value.strip()):
+                raise HTTPException(422, "Имя и фамилия не могут быть пустыми")
+            setattr(current_user, field, value)
+        db.commit()
+        db.refresh(current_user)
+        return format_user_response(current_user, db)
+
+    if user_update.department_ids is not None:
+        begin_department_write(db)
     target_user = db.query(models.User).filter(models.User.login == target_login).first()
     if not target_user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден")
@@ -793,6 +822,16 @@ async def update_user_data(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Недостаточно прав для редактирования пользователей"
     )
+
+
+@app.put("/api/user/me/preferences", response_model=schemas.UserResponse)
+async def update_own_preferences(data: schemas.ProfilePreferences,
+                                 current_user: models.User = Depends(get_current_user),
+                                 db: Session = Depends(get_db)):
+    current_user.raccoon_enabled = data.raccoon_enabled
+    db.commit()
+    db.refresh(current_user)
+    return format_user_response(current_user, db)
 
 
 @app.put("/api/user/me/change-password", summary="Change current user password")
@@ -1568,6 +1607,7 @@ async def delete_department(
             detail="Недостаточно прав для удаления отделов"
         )
     
+    begin_department_write(db)
     department = db.query(models.Department).filter(models.Department.id == department_id).first()
     if not department:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Отдел не найден")
@@ -1613,3 +1653,7 @@ app.include_router(create_budget_router(get_current_user=get_current_user, is_ex
 
 from personal_data import create_personal_data_router
 app.include_router(create_personal_data_router(get_current_user))
+
+
+from task_reports import create_report_router
+app.include_router(create_report_router(get_current_user=get_current_user, has_access_to_card=has_access_to_card, can_view_warnings=can_manage_equipment))
